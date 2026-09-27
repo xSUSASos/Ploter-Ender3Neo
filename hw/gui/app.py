@@ -35,22 +35,48 @@ from ..core import sheet as SH
 from ..core import vectorize as VZ
 from ..core import printer as PR
 from ..core import drawing as DR
+from .help_texts import HELP
 
 PAD = 6
 
-# Цвета оформления. В светлой теме ttk остаётся родным для Windows,
-# в тёмной берём «clam» — только его можно перекрасить целиком.
+# Оформление. Обе темы строятся на «clam» — только его ttk позволяет
+# перекрасить целиком, а родная тема Windows в тёмном виде не бывает.
+#   side    — боковое меню и строка состояния
+#   bg      — рабочая область; карточки-группы того же цвета, с рамкой
+#   canvas  — подложка под превью листа
 THEMES = {
-    "light": dict(bg=None, text="#334", muted="#667", error="#a33",
-                  canvas="#eceef1", tiles="#f6f7f9", field="white",
-                  field_fg="black", select="#cce0f7", select_fg="black",
-                  insert="black"),
-    "dark": dict(bg="#202124", panel="#2b2c30", text="#dcdfe4", muted="#98a0aa",
-                 error="#ff8f86", canvas="#16171a", tiles="#1a1b1e",
-                 field="#2f3136", field_fg="#e8eaed", select="#3d5a86",
-                 select_fg="white", insert="#e8eaed", border="#46494f",
-                 active="#3a3c42", accent="#6c9bf0"),
+    "light": dict(
+        side="#eef0f4", side_fg="#3b4252", side_hover="#e2e6ec",
+        side_active="#ffffff", bg="#ffffff", panel="#ffffff",
+        text="#1f2430", heading="#111827", muted="#6b7280", error="#c0392b",
+        border="#e1e4ea", field="#ffffff", field_fg="#111827",
+        btn="#f3f4f7", btn_hover="#e8ebf0", btn_press="#dde2e9",
+        accent="#2f6fed", accent_hover="#2560d6", accent_fg="#ffffff",
+        track="#dfe3ea", select="#d6e4ff", select_fg="#111827",
+        insert="#111827", canvas="#eceef2", shadow="#d3d7de", tiles="#f5f6f8",
+        tip_bg="#1f2430", tip_fg="#f3f4f6"),
+    "dark": dict(
+        side="#16171a", side_fg="#c5cad3", side_hover="#212327",
+        side_active="#26282d", bg="#1d1f23", panel="#26282d",
+        text="#e3e5e8", heading="#f3f4f6", muted="#9aa1ab", error="#ff8f86",
+        border="#33363c", field="#26282d", field_fg="#e8eaed",
+        btn="#2a2d32", btn_hover="#33363c", btn_press="#3b3f46",
+        accent="#5b8def", accent_hover="#739ef2", accent_fg="#ffffff",
+        track="#393c43", select="#34507f", select_fg="#ffffff",
+        insert="#e8eaed", canvas="#131417", shadow="#0b0c0e", tiles="#191a1d",
+        tip_bg="#3a3e46", tip_fg="#f3f4f6"),
 }
+UI_FONT = "Segoe UI"
+
+# разделы бокового меню: (атрибут вкладки, название, пояснение в шапке)
+SECTIONS = [
+    ("tab_text", "Текст", "что написать и как это будет выглядеть"),
+    ("tab_draw", "Рисунок", "картинка, SVG или эскиз мышью прямо на листе"),
+    ("tab_hand", "Почерк", "свой почерк с фото прописи или готовая пропись"),
+    ("tab_page", "Лист", "бумага, поля, строки, клетка и поворот"),
+    ("tab_human", "Реализм", "живость письма, помарки и каллиграфия"),
+    ("tab_print", "Печать", "перо, принтер, связь по USB и калибровка Z"),
+]
 
 # Виртуальные коды клавиш Windows: не зависят от раскладки. Tk привязывает
 # копирование к символу «c», а в русской раскладке это «с» (Cyrillic_es) —
@@ -59,12 +85,89 @@ _VK_EVENTS = {67: "<<Copy>>", 86: "<<Paste>>", 88: "<<Cut>>",
               90: "<<Undo>>", 89: "<<Redo>>"}
 _LATIN_KEYS = {"c", "v", "x", "z", "y"}
 DEMO = ("Привет! Это текст, который принтер напишет пером как от руки.\n\n"
-        "Замените его на свой, нажмите «Обновить превью», а когда всё "
-        "устроит — сохраните G-code или отправьте на печать прямо отсюда.")
+        "Замените его на свой — превью справа обновится само (или по F5), "
+        "а когда всё устроит, нажмите «Сохранить G-code» или «Печать».")
 NO_ART = "файл не выбран — можно просто рисовать мышью на листе справа"
 
 
 # ------------------------------------------------------------ мелочи UI
+
+class InfoIcon:
+    """
+    Значок «i» в кружке; при наведении всплывает пояснение к настройке.
+    Рисуется на холсте, а не символом шрифта: ⓘ есть не во всех шрифтах.
+    """
+
+    def __init__(self, app, parent, text):
+        self.app = app
+        self.text = text
+        self.tip = None
+        self._after = None
+        self.hover = False
+        self.cv = tk.Canvas(parent, width=18, height=18, highlightthickness=0,
+                            borderwidth=0, cursor="question_arrow")
+        self.cv.bind("<Enter>", self._enter)
+        self.cv.bind("<Leave>", self._leave)
+        self.cv.bind("<Button-1>", lambda e: self._show())
+        app._infos.append(self)
+        self.paint()
+
+    def grid(self, **kw):
+        self.cv.grid(**kw)
+        return self
+
+    def pack(self, **kw):
+        self.cv.pack(**kw)
+        return self
+
+    def paint(self):
+        C = self.app.C
+        col = C["accent"] if self.hover else C["muted"]
+        c = self.cv
+        c.delete("all")
+        c.configure(background=C["bg"])
+        c.create_oval(2, 2, 16, 16, outline=col, width=1.4)
+        c.create_text(9, 9.5, text="i", fill=col, font=(UI_FONT, 8, "bold"))
+
+    def _enter(self, _e):
+        self.hover = True
+        self.paint()
+        self._after = self.cv.after(350, self._show)
+
+    def _leave(self, _e):
+        self.hover = False
+        self.paint()
+        if self._after:
+            self.cv.after_cancel(self._after)
+            self._after = None
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+
+    def _show(self):
+        if self.tip is not None or not self.text:
+            return
+        C = self.app.C
+        tw = tk.Toplevel(self.cv)
+        tw.wm_overrideredirect(True)
+        try:
+            tw.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tw.configure(background=C["tip_bg"])
+        tk.Label(tw, text=self.text, justify="left", wraplength=340,
+                 background=C["tip_bg"], foreground=C["tip_fg"],
+                 font=(UI_FONT, 9), padx=10, pady=7).pack()
+        tw.update_idletasks()
+        x = self.cv.winfo_rootx() + 22
+        y = self.cv.winfo_rooty() - 4
+        top = self.cv.winfo_toplevel()
+        right = min(self.cv.winfo_screenwidth(), top.winfo_rootx() + top.winfo_width())
+        if x + tw.winfo_width() > right - 8:              # не за край окна
+            x = self.cv.winfo_rootx() - tw.winfo_width() - 6
+        tw.wm_geometry("+%d+%d" % (x, y))
+        self.tip = tw
+
 
 class Field:
     """Одна настройка: подпись + поле ввода/ползунок, привязанная к конфигу."""
@@ -79,7 +182,7 @@ class Field:
                      "str": str}[kind if kind != "scale" else "float"]
 
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w",
-                                           padx=(4, 6), pady=2)
+                                           padx=(6, 10), pady=3)
         if kind == "bool":
             self.var = tk.BooleanVar()
             w = ttk.Checkbutton(parent, variable=self.var,
@@ -111,11 +214,12 @@ class Field:
             w = ttk.Entry(parent, textvariable=self.var, width=width)
             w.bind("<FocusOut>", lambda e: app.on_change())
             w.bind("<Return>", lambda e: app.on_change())
-        w.grid(row=row, column=1, sticky="w", padx=(0, 8), pady=2)
+        w.grid(row=row, column=1, sticky="w", padx=(0, 6), pady=3)
         self.widget = w
-        if tip:
-            ttk.Label(parent, text=tip, style="Hint.TLabel").grid(
-                row=row, column=2, sticky="w", padx=(0, 4))
+        # пояснение — во всплывающей подсказке у значка «i», а не строкой рядом
+        self.help = HELP.get((section, attr)) or tip or label
+        self.info = InfoIcon(app, parent, self.help).grid(
+            row=row, column=2, sticky="w", padx=(0, 6))
         app.fields.append(self)
 
     def _scale_moved(self):
@@ -180,9 +284,10 @@ class Field:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Рукописный текст пером — Ender 3 Neo")
-        self.geometry("1240x820")
-        self.minsize(1050, 680)
+        self.title("Плоттер · Ender 3 Neo — текст и рисунки пером")
+        self.geometry("1320x840")
+        self.minsize(1100, 700)
+        self._setup_fonts()
 
         self.cfg = Config()
         self.fontset = FontSet(flat=self.cfg.curve_flatness)
@@ -190,6 +295,7 @@ class App(tk.Tk):
         self.pages = []
         self.page_index = 0
         self.fields = []
+        self._infos = []           # значки «i» — перекрашиваются с темой
         self.link = None
         self._defer = None
         self._photo = None
@@ -230,7 +336,18 @@ class App(tk.Tk):
     def _say(self, text, error=False):
         """Строка состояния; цвет берётся из текущей темы."""
         self.status.configure(text=text,
-                              style="Error.TLabel" if error else "TLabel")
+                              style="StatusErr.TLabel" if error else "Status.TLabel")
+
+    def _setup_fonts(self):
+        """Segoe UI вместо мелкого системного шрифта Tk — всем виджетам сразу."""
+        from tkinter import font as tkfont
+        for name, size in (("TkDefaultFont", 10), ("TkTextFont", 10),
+                           ("TkMenuFont", 10), ("TkHeadingFont", 10),
+                           ("TkCaptionFont", 10), ("TkTooltipFont", 9)):
+            try:
+                tkfont.nametofont(name).configure(family=UI_FONT, size=size)
+            except tk.TclError:
+                pass
 
     # -------------------------------------------------- память между запусками
     @staticmethod
@@ -298,8 +415,56 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ каркас
     def _build(self):
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=PAD, pady=(PAD, 0))
+        # строка состояния — внизу во всю ширину
+        self.statusbar = tk.Frame(self, height=30)
+        self.statusbar.pack(side="bottom", fill="x")
+        self.status = ttk.Label(self.statusbar, text="", anchor="w",
+                                style="Status.TLabel")
+        self.status.pack(side="left", fill="x", expand=True, padx=14, pady=5)
+
+        # боковое меню
+        self.side = tk.Frame(self, width=200)
+        self.side.pack(side="left", fill="y")
+        self.side.pack_propagate(False)
+        self.side_title = tk.Label(self.side, text="Плоттер", anchor="w",
+                                   font=(UI_FONT, 16, "bold"))
+        self.side_title.pack(fill="x", padx=20, pady=(20, 0))
+        self.side_sub = tk.Label(self.side, text="Ender 3 Neo · перо", anchor="w",
+                                 font=(UI_FONT, 9))
+        self.side_sub.pack(fill="x", padx=20, pady=(0, 18))
+        self.nav = []
+        self.side_theme = ttk.Checkbutton(self.side, text="Тёмная тема",
+                                          variable=self.v_dark,
+                                          command=self.apply_theme,
+                                          style="Side.TCheckbutton")
+        self.side_theme.pack(side="bottom", anchor="w", padx=18, pady=16)
+
+        # рабочая область: шапка раздела + страницы без ярлыков вкладок
+        main = ttk.Frame(self)
+        main.pack(side="left", fill="both", expand=True)
+        head = ttk.Frame(main)
+        head.pack(fill="x", padx=22, pady=(16, 6))
+        titles = ttk.Frame(head)
+        titles.pack(side="left")
+        self.h_title = ttk.Label(titles, text="", style="Title.TLabel")
+        self.h_title.pack(anchor="w")
+        self.h_sub = ttk.Label(titles, text="", style="Hint.TLabel")
+        self.h_sub.pack(anchor="w")
+        acts = ttk.Frame(head)
+        acts.pack(side="right")
+        ttk.Button(acts, text="Обновить  F5", command=self.rebuild).pack(side="left")
+        ttk.Button(acts, text="Граница", command=self.do_frame).pack(side="left", padx=(6, 0))
+        self.btn_export = ttk.Button(acts, text="Экспорт  ▾", command=self.export_menu)
+        self.btn_export.pack(side="left", padx=(6, 0))
+        ttk.Button(acts, text="Сохранить G-code",
+                   command=self.save_gcode).pack(side="left", padx=(6, 0))
+        ttk.Button(acts, text="Печать  ▶", style="Accent.TButton",
+                   command=self.do_print).pack(side="left", padx=(6, 0))
+        self.h_line = tk.Frame(main, height=1)
+        self.h_line.pack(fill="x", padx=22, pady=(6, 0))
+
+        nb = ttk.Notebook(main, style="Pages.TNotebook")
+        nb.pack(fill="both", expand=True, padx=14, pady=(6, 8))
         self.nb = nb
         self.tab_text = ttk.Frame(nb)
         self.tab_draw = ttk.Frame(nb)
@@ -307,19 +472,9 @@ class App(tk.Tk):
         self.tab_page = ttk.Frame(nb)
         self.tab_human = ttk.Frame(nb)
         self.tab_print = ttk.Frame(nb)
-        nb.add(self.tab_text, text="  Текст  ")
-        nb.add(self.tab_draw, text="  Рисунок  ")
-        nb.add(self.tab_hand, text="  Почерк  ")
-        nb.add(self.tab_page, text="  Лист  ")
-        nb.add(self.tab_human, text="  Реализм  ")
-        nb.add(self.tab_print, text="  Печать  ")
-
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", padx=PAD + 2, pady=(2, 6))
-        ttk.Checkbutton(bar, text="тёмная тема", variable=self.v_dark,
-                        command=self.apply_theme).pack(side="right")
-        self.status = ttk.Label(bar, text="", anchor="w")
-        self.status.pack(side="left", fill="x", expand=True)
+        for attr, name, _sub in SECTIONS:
+            nb.add(getattr(self, attr), text=name)
+            self._nav_item(attr, name)
 
         self._build_text()
         self._build_draw()
@@ -334,63 +489,133 @@ class App(tk.Tk):
         self.bind("<Control-S>", lambda e: self.save_gcode())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _nav_item(self, attr, name):
+        """Пункт бокового меню: цветная полоска слева у текущего раздела."""
+        row = tk.Frame(self.side, cursor="hand2")
+        row.pack(fill="x", padx=10, pady=1)
+        bar = tk.Frame(row, width=3)
+        bar.pack(side="left", fill="y")
+        lbl = tk.Label(row, text=name, anchor="w", font=(UI_FONT, 11),
+                       padx=14, pady=8, cursor="hand2")
+        lbl.pack(side="left", fill="x", expand=True)
+        item = {"attr": attr, "row": row, "bar": bar, "lbl": lbl, "hover": False}
+
+        def go(_e=None):
+            self.nb.select(getattr(self, attr))
+
+        def hover(on):
+            item["hover"] = on
+            self._paint_nav()
+        for w in (row, lbl, bar):
+            w.bind("<Button-1>", go)
+            w.bind("<Enter>", lambda e: hover(True))
+            w.bind("<Leave>", lambda e: hover(False))
+        self.nav.append(item)
+
+    def _paint_nav(self):
+        C = self.C
+        try:
+            cur = self.nb.select()
+        except tk.TclError:
+            cur = ""
+        for it in self.nav:
+            active = cur == str(getattr(self, it["attr"]))
+            bg = C["side_active"] if active else (
+                C["side_hover"] if it["hover"] else C["side"])
+            it["row"].configure(background=bg)
+            it["lbl"].configure(background=bg,
+                                foreground=C["heading"] if active else C["side_fg"],
+                                font=(UI_FONT, 11, "bold" if active else "normal"))
+            it["bar"].configure(background=C["accent"] if active else bg)
+        for attr, name, sub in SECTIONS:
+            if cur == str(getattr(self, attr)):
+                self.h_title.configure(text=name)
+                self.h_sub.configure(text=sub)
+
+    def export_menu(self):
+        m = self._menu()
+        m.add_command(label="Превью в SVG…", command=self.save_svg)
+        m.add_command(label="Превью в PNG…", command=self.save_png)
+        m.add_separator()
+        m.add_command(label="Сохранить профиль настроек…", command=self.save_profile)
+        m.add_command(label="Загрузить профиль настроек…", command=self.load_profile)
+        b = self.btn_export
+        try:
+            m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
+        finally:
+            m.grab_release()
+
     # -------------------------------------------------------- вкладка Текст
     def _build_text(self):
         f = self.tab_text
-        f.columnconfigure(0, weight=3, minsize=380)
-        f.columnconfigure(1, weight=5)
+        f.columnconfigure(0, weight=4, minsize=380)
+        f.columnconfigure(1, weight=5, minsize=440)
         f.rowconfigure(1, weight=1)
 
         bar = ttk.Frame(f)
-        bar.grid(row=0, column=0, sticky="ew", pady=(6, 2), padx=4)
+        bar.grid(row=0, column=0, sticky="ew", pady=(8, 6), padx=8)
         ttk.Button(bar, text="Открыть файл…", command=self.open_text).pack(side="left")
         ttk.Button(bar, text="Очистить",
-                   command=lambda: self.txt.delete("1.0", "end")).pack(side="left", padx=4)
-        ttk.Button(bar, text="Обновить превью  (F5)",
-                   command=self.rebuild).pack(side="left", padx=12)
+                   command=lambda: self.txt.delete("1.0", "end")).pack(side="left", padx=6)
+        self.lbl_chars = ttk.Label(bar, text="", style="Hint.TLabel")
+        self.lbl_chars.pack(side="right")
 
-        box = ttk.Frame(f)
-        box.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
-        box.rowconfigure(0, weight=1)
-        box.columnconfigure(0, weight=1)
-        self.txt = tk.Text(box, wrap="word", undo=True, font=("Consolas", 11))
+        # поле текста — в рамке, которая подсвечивается при вводе
+        self.txt_box = tk.Frame(f, highlightthickness=1, borderwidth=0)
+        self.txt_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.txt_box.rowconfigure(0, weight=1)
+        self.txt_box.columnconfigure(0, weight=1)
+        self.txt = tk.Text(self.txt_box, wrap="word", undo=True,
+                           font=(UI_FONT, 12), borderwidth=0, relief="flat",
+                           padx=16, pady=12, spacing1=2, spacing3=4,
+                           highlightthickness=0)
         self.txt.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(box, command=self.txt.yview)
+        sb = ttk.Scrollbar(self.txt_box, command=self.txt.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.txt.configure(yscrollcommand=sb.set)
+        self.txt.bind("<FocusIn>", lambda e: self._txt_focus(True))
+        self.txt.bind("<FocusOut>", lambda e: self._txt_focus(False))
+        self.txt.bind("<<Modified>>", self._txt_modified)
 
         right = ttk.Frame(f)
-        right.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=4, pady=6)
+        right.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(4, 8), pady=(8, 8))
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
 
         top = ttk.Frame(right)
-        top.grid(row=0, column=0, sticky="ew")
-        ttk.Button(top, text="◀", width=3, command=lambda: self.turn(-1)).pack(side="left")
-        self.lbl_page = ttk.Label(top, text="—", width=14, anchor="center")
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(top, text="‹", width=2, style="Small.TButton",
+                   command=lambda: self.turn(-1)).pack(side="left")
+        self.lbl_page = ttk.Label(top, text="—", width=12, anchor="center")
         self.lbl_page.pack(side="left", padx=2)
-        ttk.Button(top, text="▶", width=3, command=lambda: self.turn(1)).pack(side="left")
+        ttk.Button(top, text="›", width=2, style="Small.TButton",
+                   command=lambda: self.turn(1)).pack(side="left")
 
         self.v_travel = tk.BooleanVar(value=False)
         self.v_margins = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="холостые ходы", variable=self.v_travel,
-                        command=self.redraw).pack(side="left", padx=(14, 4))
+        InfoIcon(self, top, HELP["margins"]).pack(side="right", padx=(2, 0))
         ttk.Checkbutton(top, text="поля", variable=self.v_margins,
-                        command=self.redraw).pack(side="left", padx=4)
+                        command=self.redraw).pack(side="right")
+        InfoIcon(self, top, HELP["travel"]).pack(side="right", padx=(2, 12))
+        ttk.Checkbutton(top, text="холостые ходы", variable=self.v_travel,
+                        command=self.redraw).pack(side="right")
 
         self.canvas = tk.Canvas(right, highlightthickness=0)
-        self.canvas.grid(row=1, column=0, sticky="nsew", pady=4)
+        self.canvas.grid(row=1, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", lambda e: self.redraw())
 
-        bot = ttk.Frame(right)
-        bot.grid(row=2, column=0, sticky="ew")
-        ttk.Button(bot, text="Сохранить G-code…",
-                   command=self.save_gcode).pack(side="left")
-        ttk.Button(bot, text="SVG…", command=self.save_svg).pack(side="left", padx=4)
-        ttk.Button(bot, text="PNG…", command=self.save_png).pack(side="left")
-        ttk.Button(bot, text="Граница на принтере…",
-                   command=self.do_frame).pack(side="left", padx=12)
-        ttk.Button(bot, text="Профиль…", command=self.profile_menu).pack(side="right")
+    def _txt_focus(self, on):
+        C = self.C
+        self.txt_box.configure(highlightbackground=C["accent"] if on else C["border"],
+                               highlightcolor=C["accent"] if on else C["border"])
+
+    def _txt_modified(self, _e=None):
+        try:
+            n = len(self.txt.get("1.0", "end-1c"))
+            self.txt.edit_modified(False)
+        except tk.TclError:
+            return
+        self.lbl_chars.configure(text="символов: %d" % n)
 
     # ------------------------------------------------------ вкладка Рисунок
     def _scroll_panel(self, parent, width=440):
@@ -546,12 +771,11 @@ class App(tk.Tk):
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
         top = ttk.Frame(right)
-        top.grid(row=0, column=0, sticky="ew")
-        self.lbl_dpage = ttk.Label(top, text="—")
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.lbl_dpage = ttk.Label(top, text="—", style="Hint.TLabel")
         self.lbl_dpage.pack(side="left")
-        ttk.Button(top, text="Обновить  (F5)", command=self.rebuild).pack(side="right")
         self.dcanvas = tk.Canvas(right, highlightthickness=0, cursor="pencil")
-        self.dcanvas.grid(row=1, column=0, sticky="nsew", pady=4)
+        self.dcanvas.grid(row=1, column=0, sticky="nsew")
         self.dcanvas.bind("<Configure>", lambda e: self.redraw_draw())
         self.dcanvas.bind("<ButtonPress-1>", self._d_press)
         self.dcanvas.bind("<B1-Motion>", self._d_move)
@@ -560,14 +784,6 @@ class App(tk.Tk):
         self.dcanvas.bind("<Delete>", lambda e: self.sel_delete())
         for key, dx, dy in (("Left", -1, 0), ("Right", 1, 0), ("Up", 0, 1), ("Down", 0, -1)):
             self.dcanvas.bind("<%s>" % key, lambda e, a=dx, b=dy: self._sel_nudge(e, a, b))
-        bot = ttk.Frame(right)
-        bot.grid(row=2, column=0, sticky="ew")
-        ttk.Button(bot, text="Сохранить G-code…",
-                   command=self.save_gcode).pack(side="left")
-        ttk.Button(bot, text="SVG…", command=self.save_svg).pack(side="left", padx=4)
-        ttk.Button(bot, text="PNG…", command=self.save_png).pack(side="left")
-        ttk.Button(bot, text="Граница…", command=self.do_frame).pack(side="left", padx=(12, 4))
-        ttk.Button(bot, text="Печать…", command=self.do_print).pack(side="left")
 
     # ------------------------------------------------------- вкладка Почерк
     def _build_hand(self):
@@ -575,8 +791,8 @@ class App(tk.Tk):
         f.columnconfigure(1, weight=1)
         f.rowconfigure(1, weight=1)
 
-        left = ttk.Frame(f)
-        left.grid(row=0, column=0, rowspan=2, sticky="nsw", padx=6, pady=6)
+        box, self.handpanel, left = self._scroll_panel(f, width=300)
+        box.grid(row=0, column=0, rowspan=2, sticky="nsw", padx=6, pady=6)
 
         g1 = ttk.LabelFrame(left, text="1. Напечатать пропись")
         g1.pack(fill="x", pady=(0, 8))
@@ -593,6 +809,7 @@ class App(tk.Tk):
         self.v_variants = tk.IntVar(value=3)
         ttk.Spinbox(row, from_=1, to=6, width=4,
                     textvariable=self.v_variants).pack(side="left", padx=4)
+        InfoIcon(self, row, HELP["variants"]).pack(side="left")
         ttk.Button(g1, text="Создать шаблон…",
                    command=self.make_template).pack(fill="x", padx=8, pady=6)
         ttk.Label(g1, text="Распечатайте, впишите буквы\nтёмной ручкой, сфотографируйте.",
@@ -610,11 +827,15 @@ class App(tk.Tk):
                   orient="horizontal", length=110).pack(side="left", padx=4)
         self.lbl_ink = ttk.Label(rr, text="0.68", width=5)
         self.lbl_ink.pack(side="left")
+        InfoIcon(self, rr, HELP["ink"]).pack(side="left")
         self.v_ink.trace_add("write", lambda *a: self.lbl_ink.configure(
             text="%.2f" % self.v_ink.get()))
         self.v_delines = tk.BooleanVar(value=False)
-        ttk.Checkbutton(g2, text="вычитать разлиновку",
-                        variable=self.v_delines).pack(anchor="w", padx=8)
+        dl = ttk.Frame(g2)
+        dl.pack(anchor="w", padx=8)
+        ttk.Checkbutton(dl, text="вычитать разлиновку",
+                        variable=self.v_delines).pack(side="left")
+        InfoIcon(self, dl, HELP["delines"]).pack(side="left", padx=4)
         ttk.Label(g2, text="нужно, только если линии шаблона\nпропечатались слишком тёмными",
                   style="Hint.TLabel", justify="left").pack(anchor="w", padx=8)
         ttk.Button(g2, text="Распознать заново",
@@ -635,9 +856,12 @@ class App(tk.Tk):
         ttk.Button(g3, text="Очистить почерк",
                    command=self.clear_font).pack(fill="x", padx=8, pady=(2, 6))
         self.v_fallback = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g3, text="встроенный шрифт\nдля недостающих букв",
+        fb = ttk.Frame(g3)
+        fb.pack(anchor="w", padx=8, pady=(0, 6))
+        ttk.Checkbutton(fb, text="встроенный шрифт\nдля недостающих букв",
                         variable=self.v_fallback,
-                        command=self.on_change).pack(anchor="w", padx=8, pady=(0, 6))
+                        command=self.on_change).pack(side="left")
+        InfoIcon(self, fb, HELP["fallback"]).pack(side="left", padx=4)
 
         head = ttk.Frame(f)
         head.grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 0))
@@ -769,8 +993,8 @@ class App(tk.Tk):
     # ------------------------------------------------------ вкладка Реализм
     def _build_human(self):
         f = self.tab_human
-        wrap = ttk.Frame(f)
-        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        box, self.hpanel, wrap = self._scroll_panel(f, width=1060)
+        box.pack(fill="both", expand=True, padx=10, pady=6)
 
         top = ttk.Frame(wrap)
         top.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
@@ -780,6 +1004,7 @@ class App(tk.Tk):
                      values=list(HUMAN_PRESETS), width=26).pack(side="left")
         ttk.Button(top, text="Применить",
                    command=self.apply_preset).pack(side="left", padx=6)
+        InfoIcon(self, top, HELP["preset"]).pack(side="left", padx=2)
 
         g = ttk.LabelFrame(wrap, text="Разнобой букв")
         g.grid(row=1, column=0, sticky="nw", padx=6, pady=6)
@@ -893,7 +1118,7 @@ class App(tk.Tk):
         Field(self, g2, r, "пищать в конце", "machine", "beep_at_end", "bool"); r += 1
 
         g3 = ttk.LabelFrame(wrap, text="Связь по USB")
-        g3.grid(row=1, column=0, columnspan=2, sticky="nwe", padx=6, pady=6)
+        g3.grid(row=1, column=0, columnspan=3, sticky="nwe", padx=6, pady=6)
         row = ttk.Frame(g3)
         row.pack(fill="x", padx=6, pady=6)
         ttk.Label(row, text="порт:").pack(side="left")
@@ -901,11 +1126,13 @@ class App(tk.Tk):
         self.cb_port = ttk.Combobox(row, textvariable=self.v_port, width=34,
                                     state="readonly")
         self.cb_port.pack(side="left", padx=4)
+        InfoIcon(self, row, HELP["port"]).pack(side="left", padx=(0, 6))
         ttk.Button(row, text="Обновить", command=self.refresh_ports).pack(side="left")
         ttk.Label(row, text="скорость:").pack(side="left", padx=(12, 2))
         self.v_baud = tk.StringVar(value="115200")
         ttk.Combobox(row, textvariable=self.v_baud, width=8, state="readonly",
                      values=["115200", "250000", "57600", "9600"]).pack(side="left")
+        InfoIcon(self, row, HELP["baud"]).pack(side="left", padx=4)
 
         row2 = ttk.Frame(g3)
         row2.pack(fill="x", padx=6, pady=(0, 6))
@@ -924,13 +1151,14 @@ class App(tk.Tk):
                                    state="disabled")
         self.btn_stop.pack(side="left")
 
-        jog = ttk.LabelFrame(wrap, text="Подвинуть перо (для подбора Z)")
-        jog.grid(row=1, column=2, sticky="nw", padx=6, pady=6)
+        jog = ttk.LabelFrame(wrap, text="Подвинуть перо (подбор Z)")
+        jog.grid(row=0, column=2, sticky="nw", padx=6, pady=6)
         jr = ttk.Frame(jog)
         jr.pack(padx=6, pady=6)
         for i, d in enumerate((1.0, 0.1, -0.1, -1.0)):
-            ttk.Button(jr, text="Z %+.1f" % d, width=7,
-                       command=lambda dd=d: self.jog_z(dd)).grid(row=0, column=i, padx=2)
+            ttk.Button(jr, text="Z %+.1f" % d, width=6, style="Small.TButton",
+                       command=lambda dd=d: self.jog_z(dd)).grid(row=i // 2, column=i % 2,
+                                                                  padx=2, pady=2)
         ttk.Button(jog, text="Записать текущий Z как «Z письма»",
                    command=self.grab_z).pack(fill="x", padx=6, pady=(0, 6))
 
@@ -1051,71 +1279,145 @@ class App(tk.Tk):
         dark = bool(self.v_dark.get())
         C = self.C = THEMES["dark" if dark else "light"]
         st = ttk.Style(self)
-        if dark:
-            st.theme_use("clam")
-            st.configure(".", background=C["bg"], foreground=C["text"],
-                         fieldbackground=C["field"], bordercolor=C["border"],
-                         lightcolor=C["panel"], darkcolor=C["bg"],
-                         troughcolor=C["panel"], selectbackground=C["select"],
-                         selectforeground=C["select_fg"], insertcolor=C["insert"],
-                         arrowcolor=C["text"], focuscolor=C["accent"])
-            st.map(".", foreground=[("disabled", C["muted"])],
-                   background=[("disabled", C["bg"])])
-            st.configure("TButton", background=C["panel"], padding=(8, 3))
-            st.map("TButton", background=[("pressed", C["select"]),
-                                          ("active", C["active"]),
-                                          ("disabled", C["bg"])])
-            st.configure("TNotebook", background=C["bg"])
-            st.configure("TNotebook.Tab", background=C["panel"],
-                         foreground=C["muted"], padding=(10, 4))
-            st.map("TNotebook.Tab",
-                   background=[("selected", C["bg"]), ("active", C["active"])],
-                   foreground=[("selected", C["text"])])
-            st.configure("TLabelframe.Label", foreground=C["text"])
-            for w in ("TEntry", "TSpinbox", "TCombobox"):
-                st.configure(w, fieldbackground=C["field"],
-                             foreground=C["field_fg"], background=C["panel"])
-            st.map("TCombobox",
-                   fieldbackground=[("readonly", C["field"])],
-                   foreground=[("readonly", C["field_fg"])],
-                   selectbackground=[("readonly", C["field"])],
-                   selectforeground=[("readonly", C["field_fg"])])
-            for w in ("TCheckbutton", "TRadiobutton"):
-                st.configure(w, indicatorbackground=C["field"],
-                             indicatorforeground=C["text"])
-                st.map(w, background=[("active", C["bg"])],
-                       indicatorbackground=[("pressed", C["active"]),
-                                            ("selected", C["field"])])
-            st.configure("TScale", background=C["active"])
-            st.configure("Horizontal.TProgressbar", background=C["accent"])
-            st.configure("TScrollbar", background=C["panel"],
-                         troughcolor=C["bg"])
-            st.map("TScrollbar", background=[("active", C["active"])])
-        else:
-            st.theme_use(self._native_theme)
-        st.configure("Hint.TLabel", foreground=C["muted"])
+        st.theme_use("clam")
+        f_ui = (UI_FONT, 10)
+        st.configure(".", background=C["bg"], foreground=C["text"], font=f_ui,
+                     fieldbackground=C["field"], bordercolor=C["border"],
+                     lightcolor=C["bg"], darkcolor=C["bg"],
+                     troughcolor=C["track"], selectbackground=C["select"],
+                     selectforeground=C["select_fg"], insertcolor=C["insert"],
+                     arrowcolor=C["muted"], focuscolor=C["accent"])
+        st.map(".", foreground=[("disabled", C["muted"])],
+               background=[("disabled", C["bg"])])
+        st.configure("TFrame", background=C["bg"])
+        st.configure("TLabel", background=C["bg"], foreground=C["text"])
+        st.configure("Hint.TLabel", foreground=C["muted"], font=(UI_FONT, 9))
         st.configure("Error.TLabel", foreground=C["error"])
-        if dark:                        # в светлой теме подписи остаются родными
-            st.configure("TLabel", foreground=C["text"])
+        st.configure("Title.TLabel", foreground=C["heading"],
+                     font=(UI_FONT, 18, "bold"))
+        st.configure("Status.TLabel", background=C["side"], foreground=C["muted"],
+                     font=(UI_FONT, 9))
+        st.configure("StatusErr.TLabel", background=C["side"],
+                     foreground=C["error"], font=(UI_FONT, 9))
 
-        self.configure(background=C["bg"] or st.lookup(".", "background")
-                       or "SystemButtonFace")
+        # кнопки: спокойные серые и одна акцентная — «Печать»
+        st.configure("TButton", background=C["btn"], foreground=C["text"],
+                     bordercolor=C["border"], lightcolor=C["btn"],
+                     darkcolor=C["btn"], padding=(12, 5), relief="flat",
+                     focuscolor=C["btn"])
+        st.map("TButton",
+               background=[("disabled", C["bg"]), ("pressed", C["btn_press"]),
+                           ("active", C["btn_hover"])],
+               lightcolor=[("pressed", C["btn_press"]), ("active", C["btn_hover"])],
+               darkcolor=[("pressed", C["btn_press"]), ("active", C["btn_hover"])],
+               bordercolor=[("focus", C["accent"])])
+        st.configure("Small.TButton", padding=(6, 3))
+        st.configure("Accent.TButton", background=C["accent"],
+                     foreground=C["accent_fg"], bordercolor=C["accent"],
+                     lightcolor=C["accent"], darkcolor=C["accent"],
+                     font=(UI_FONT, 10, "bold"), focuscolor=C["accent"])
+        st.map("Accent.TButton",
+               background=[("pressed", C["accent_hover"]), ("active", C["accent_hover"])],
+               lightcolor=[("active", C["accent_hover"])],
+               darkcolor=[("active", C["accent_hover"])],
+               bordercolor=[("active", C["accent_hover"])],
+               foreground=[("disabled", C["muted"])])
+
+        # группы настроек — «карточки»: тонкая рамка и жирный заголовок
+        st.configure("TLabelframe", background=C["bg"], bordercolor=C["border"],
+                     lightcolor=C["border"], darkcolor=C["border"],
+                     relief="solid", borderwidth=1, padding=(10, 6, 10, 10))
+        st.configure("TLabelframe.Label", background=C["bg"],
+                     foreground=C["heading"], font=(UI_FONT, 10, "bold"))
+
+        for w in ("TEntry", "TSpinbox", "TCombobox"):
+            st.configure(w, fieldbackground=C["field"], foreground=C["field_fg"],
+                         background=C["btn"], bordercolor=C["border"],
+                         lightcolor=C["field"], darkcolor=C["field"],
+                         padding=(6, 3), arrowcolor=C["muted"])
+            st.map(w, bordercolor=[("focus", C["accent"]), ("hover", C["muted"])],
+                   lightcolor=[("focus", C["field"])])
+        st.map("TCombobox",
+               fieldbackground=[("readonly", C["field"])],
+               foreground=[("readonly", C["field_fg"])],
+               selectbackground=[("readonly", C["field"])],
+               selectforeground=[("readonly", C["field_fg"])],
+               bordercolor=[("focus", C["accent"]), ("hover", C["muted"])])
+        for w in ("TCheckbutton", "TRadiobutton"):
+            st.configure(w, background=C["bg"], foreground=C["text"],
+                         indicatorbackground=C["field"],
+                         indicatorforeground=C["accent_fg"],
+                         bordercolor=C["muted"], indicatormargin=(0, 0, 6, 0),
+                         focuscolor=C["bg"])
+            st.map(w, background=[("active", C["bg"])],
+                   indicatorbackground=[("selected", C["accent"]),
+                                        ("pressed", C["btn_press"])],
+                   bordercolor=[("selected", C["accent"])])
+        st.configure("Side.TCheckbutton", background=C["side"],
+                     foreground=C["side_fg"], focuscolor=C["side"])
+        st.map("Side.TCheckbutton", background=[("active", C["side"])])
+
+        st.configure("Horizontal.TScale", background=C["bg"],
+                     troughcolor=C["bg"], bordercolor=C["bg"],
+                     lightcolor=C["bg"], darkcolor=C["bg"], borderwidth=0)
+        st.map("Horizontal.TScale", background=[("active", C["bg"])])
+        st.configure("Horizontal.TProgressbar", background=C["accent"],
+                     troughcolor=C["track"], bordercolor=C["track"],
+                     lightcolor=C["accent"], darkcolor=C["accent"], thickness=8)
+        for o in ("Vertical", "Horizontal"):
+            st.configure("%s.TScrollbar" % o, background=C["track"],
+                         troughcolor=C["bg"], bordercolor=C["bg"],
+                         lightcolor=C["track"], darkcolor=C["track"],
+                         arrowcolor=C["muted"], gripcount=0, relief="flat",
+                         arrowsize=12)
+            st.map("%s.TScrollbar" % o,
+                   background=[("active", C["muted"]), ("pressed", C["muted"])])
+
+        self._make_elements(st, C, "dark" if dark else "light")
+
+        # страницы без ярлыков: разделы переключаются боковым меню
+        st.layout("Pages.TNotebook.Tab", [])
+        st.configure("Pages.TNotebook", background=C["bg"], borderwidth=0,
+                     tabmargins=0, bordercolor=C["bg"], lightcolor=C["bg"],
+                     darkcolor=C["bg"])
+
+        bg = C["bg"]
+        self.configure(background=bg)
+        for w in (self.side, self.side_title, self.side_sub):
+            w.configure(background=C["side"])
+        self.side_title.configure(foreground=C["heading"])
+        self.side_sub.configure(foreground=C["muted"])
+        self.statusbar.configure(background=C["side"])
+        self.h_line.configure(background=C["border"])
+        self._paint_nav()
+
         for t in (self.txt, self.log):
             t.configure(background=C["field"], foreground=C["field_fg"],
                         insertbackground=C["insert"],
                         selectbackground=C["select"],
                         selectforeground=C["select_fg"])
+        self.txt_box.configure(background=C["field"])
+        try:
+            focused = self.focus_get() is self.txt
+        except (KeyError, tk.TclError):       # фокус во всплывающем списке
+            focused = False
+        self._txt_focus(focused)
+        self.log.configure(highlightthickness=1, highlightbackground=C["border"],
+                           highlightcolor=C["accent"], borderwidth=0,
+                           padx=8, pady=6)
         self.canvas.configure(background=C["canvas"])
         self.dcanvas.configure(background=C["canvas"])
         self.gcanvas.configure(background=C["tiles"])
-        for pnl in (self.dpanel, self.ppanel):
-            pnl.configure(background=C["bg"] or st.lookup(".", "background")
-                          or "SystemButtonFace")
+        for pnl in (self.dpanel, self.ppanel, self.hpanel, self.handpanel):
+            pnl.configure(background=bg)
+        for ic in getattr(self, "_infos", []):
+            ic.paint()
 
         # выпадающие списки: и будущие, и уже открывавшиеся
         for k, v in (("background", C["field"]), ("foreground", C["field_fg"]),
                      ("selectBackground", C["select"]),
-                     ("selectForeground", C["select_fg"])):
+                     ("selectForeground", C["select_fg"]),
+                     ("font", "{%s} 10" % UI_FONT)):
             self.option_add("*TCombobox*Listbox." + k, v)
         for cb in self._walk(self):
             if isinstance(cb, ttk.Combobox):
@@ -1128,7 +1430,86 @@ class App(tk.Tk):
                                  "-selectforeground", C["select_fg"])
                 except tk.TclError:
                     pass
+        if self.pages:
+            self.redraw()
         self._titlebar(dark)
+
+    def _make_elements(self, st, C, key):
+        """
+        Галочки, переключатели и ползунки — картинками: у «clam» галочка
+        рисуется крестиком, а ползунок толстой плашкой. Картинки рисуются
+        с 4-кратным запасом и уменьшаются — края выходят гладкими.
+        Элементы создаются один раз на тему; при смене темы меняется
+        только раскладка стилей.
+        """
+        from PIL import Image as _Im, ImageDraw as _Dr
+        self._elem_imgs = getattr(self, "_elem_imgs", {})
+        pre = "hw%s" % key
+        if key not in self._elem_imgs:
+            def pic(w, h, fn):
+                k = 4
+                im = _Im.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
+                fn(_Dr.Draw(im), k)
+                return ImageTk.PhotoImage(im.resize((w, h), _Im.LANCZOS), master=self)
+
+            def box(fill, edge):
+                return lambda d, k: d.rounded_rectangle(
+                    [1 * k, 1 * k, 17 * k, 17 * k], radius=4 * k, fill=fill,
+                    outline=edge, width=int(1.5 * k))
+
+            def check(d, k):
+                box(C["accent"], C["accent"])(d, k)
+                d.line([(5 * k, 9.5 * k), (8 * k, 12.5 * k), (13.5 * k, 6 * k)],
+                       fill=C["accent_fg"], width=int(2.2 * k), joint="curve")
+
+            def ring(fill, edge, dot=None):
+                def f(d, k):
+                    d.ellipse([1 * k, 1 * k, 17 * k, 17 * k], fill=fill, outline=edge,
+                              width=int(1.5 * k))
+                    if dot:
+                        d.ellipse([6 * k, 6 * k, 12 * k, 12 * k], fill=dot)
+                return f
+
+            imgs = {
+                "cb_off": pic(18, 18, box(C["field"], C["muted"])),
+                "cb_hover": pic(18, 18, box(C["field"], C["accent"])),
+                "cb_on": pic(18, 18, check),
+                "cb_dis": pic(18, 18, box(C["bg"], C["border"])),
+                "rb_off": pic(18, 18, ring(C["field"], C["muted"])),
+                "rb_hover": pic(18, 18, ring(C["field"], C["accent"])),
+                "rb_on": pic(18, 18, ring(C["accent"], C["accent"], C["accent_fg"])),
+                "tr": pic(24, 18, lambda d, k: d.rounded_rectangle(
+                    [2 * k, 7 * k, 22 * k, 11 * k], radius=2 * k, fill=C["track"])),
+                "kn": pic(18, 18, lambda d, k: d.ellipse(
+                    [1.5 * k, 1.5 * k, 16.5 * k, 16.5 * k], fill=C["field"],
+                    outline=C["accent"], width=int(2.5 * k))),
+                "kn_act": pic(18, 18, lambda d, k: d.ellipse(
+                    [1.5 * k, 1.5 * k, 16.5 * k, 16.5 * k], fill=C["accent"],
+                    outline=C["accent"], width=int(2.5 * k))),
+            }
+            self._elem_imgs[key] = imgs
+            st.element_create(pre + ".Checkbutton.indicator", "image", imgs["cb_off"],
+                              ("disabled", imgs["cb_dis"]), ("selected", imgs["cb_on"]),
+                              ("active", imgs["cb_hover"]), sticky="w", width=26)
+            st.element_create(pre + ".Radiobutton.indicator", "image", imgs["rb_off"],
+                              ("disabled", imgs["cb_dis"]), ("selected", imgs["rb_on"]),
+                              ("active", imgs["rb_hover"]), sticky="w", width=26)
+            st.element_create(pre + ".Horizontal.Scale.trough", "image", imgs["tr"],
+                              border=(8, 0, 8, 0), sticky="ew")
+            st.element_create(pre + ".Horizontal.Scale.slider", "image", imgs["kn"],
+                              ("pressed", imgs["kn_act"]), ("active", imgs["kn_act"]),
+                              sticky="")
+        for cls in ("Checkbutton", "Radiobutton"):
+            layout = [("%s.padding" % cls, {"sticky": "nswe", "children": [
+                ("%s.%s.indicator" % (pre, cls), {"side": "left", "sticky": "w"}),
+                ("%s.focus" % cls, {"side": "left", "sticky": "w", "children": [
+                    ("%s.label" % cls, {"sticky": "nswe"})]})]})]
+            st.layout("T" + cls, layout)
+            if cls == "Checkbutton":
+                st.layout("Side.TCheckbutton", layout)
+        st.layout("Horizontal.TScale", [
+            (pre + ".Horizontal.Scale.trough", {"sticky": "ew", "children": [
+                (pre + ".Horizontal.Scale.slider", {"side": "left", "sticky": ""})]})])
 
     def _walk(self, w):
         for c in w.winfo_children():
@@ -1266,14 +1647,16 @@ class App(tk.Tk):
         c = self.canvas
         cw, ch = max(50, c.winfo_width()), max(50, c.winfo_height())
         pg = self.cfg.page
-        scale = min((cw - 16) / max(pg.sheet_w, 1), (ch - 16) / max(pg.sheet_h, 1))
+        scale = min((cw - 40) / max(pg.sheet_w, 1), (ch - 40) / max(pg.sheet_h, 1))
         scale = max(0.6, scale)
         img = PV.to_image(self.pages[self.page_index], pg, px_per_mm=scale,
                           show_travel=self.v_travel.get(),
                           show_margins=self.v_margins.get(),
-                          art_width=self.cfg.draw.pen_width)
+                          art_width=self.cfg.draw.pen_width,
+                          bg=self.C["canvas"])
         self._photo = ImageTk.PhotoImage(img, master=self)
         c.delete("all")
+        self._sheet_shadow(c, cw, ch, img.size)
         c.create_image(cw // 2, ch // 2, image=self._photo)
         self.lbl_page.configure(text="лист %d из %d"
                                      % (self.page_index + 1, len(self.pages)))
@@ -1281,6 +1664,15 @@ class App(tk.Tk):
         self._bed_photo = ImageTk.PhotoImage(
             PV.bed_image(self.pages[self.page_index], self.cfg), master=self)
         self.lbl_bed.configure(image=self._bed_photo)
+
+    def _sheet_shadow(self, c, cw, ch, size):
+        """Мягкая тень под листом: лист «лежит» на подложке."""
+        W, H = size
+        x0, y0 = cw // 2 - W / 2.0, ch // 2 - H / 2.0
+        C = self.C
+        for d, col in ((6, C["canvas"]), (4, C["shadow"]), (2, C["shadow"])):
+            c.create_rectangle(x0 + d - 1, y0 + d, x0 + W + d, y0 + H + d,
+                               fill=col, outline="")
 
     # ============================================================ файлы
     def open_text(self):
@@ -1401,6 +1793,7 @@ class App(tk.Tk):
             return False
 
     def _tab_changed(self, _e=None):
+        self._paint_nav()
         if self._on_draw_tab() and self.pages:
             # сохранение и печать с этой вкладки — именно листа с рисунком
             if self.page_index != self._art_page:
@@ -1442,12 +1835,14 @@ class App(tk.Tk):
         cw, ch = max(50, c.winfo_width()), max(50, c.winfo_height())
         pg = self.cfg.page
         idx = min(self._art_page, len(self.pages) - 1)
-        scale = min((cw - 16) / max(pg.sheet_w, 1), (ch - 16) / max(pg.sheet_h, 1))
+        scale = min((cw - 40) / max(pg.sheet_w, 1), (ch - 40) / max(pg.sheet_h, 1))
         scale = max(0.6, scale)
         img = PV.to_image(self.pages[idx], pg, px_per_mm=scale,
-                          show_margins=True, art_width=self.cfg.draw.pen_width)
+                          show_margins=True, art_width=self.cfg.draw.pen_width,
+                          bg=self.C["canvas"])
         self._dphoto = ImageTk.PhotoImage(img, master=self)
         c.delete("all")
+        self._sheet_shadow(c, cw, ch, img.size)
         c.create_image(cw // 2, ch // 2, image=self._dphoto)
         W, H = img.size
         self._dmap = (cw // 2 - W / 2.0, ch // 2 - H / 2.0, scale, pg.sheet_h)

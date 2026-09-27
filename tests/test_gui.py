@@ -118,10 +118,17 @@ check("латиница не задваивает вставку", r is None and
 print("тема:")
 app.v_dark.set(True); app.apply_theme(); app.update()
 check("тёмная тема включилась", app.tk.call("ttk::style", "theme", "use") == "clam")
-check("поле текста потемнело", app.txt.cget("background") == "#2f3136")
+from hw.gui.app import THEMES
+check("поле текста потемнело", app.txt.cget("background") == THEMES["dark"]["field"])
 app.v_dark.set(False); app.apply_theme(); app.update()
-check("светлая вернула родное оформление",
-      app.tk.call("ttk::style", "theme", "use") == app._native_theme)
+check("светлая тема вернула светлые цвета",
+      app.txt.cget("background") == THEMES["light"]["field"]
+      and app.side.cget("background") == THEMES["light"]["side"])
+check("у каждой настройки есть пояснение у значка «i»",
+      all(f.info.text for f in app.fields) and len(app._infos) >= len(app.fields))
+app.nb.select(app.tab_page); app.update()
+check("боковое меню и шапка следуют за разделом",
+      app.h_title.cget("text") == "Лист")
 
 print("управление своим шрифтом:")
 from hw.core.glyphset import Glyph

@@ -571,7 +571,9 @@ check("отмена возвращает и картинку", abs(app.cfg.draw.
 
 app.v_dark.set(True)
 app.apply_theme()
-check("тёмная тема красит холст рисунка", app.dcanvas.cget("background") == "#16171a")
+from hw.gui.app import THEMES
+check("тёмная тема красит холст рисунка",
+      app.dcanvas.cget("background") == THEMES["dark"]["canvas"])
 app.destroy()
 
 print("\nитог: %s" % ("всё в порядке" if not fails else "провалено: %s" % fails))
