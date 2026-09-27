@@ -1,0 +1,10 @@
+# Нужно только для запуска из исходников: готовый dist/handwriter.exe
+# самодостаточен. tkinter входит в стандартную поставку Python для Windows.
+pillow>=10.0
+numpy>=1.24
+scipy>=1.10
+opencv-python>=4.8
+pyserial>=3.5
+
+# только для пересборки exe
+# pyinstaller>=6.0
