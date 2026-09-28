@@ -43,6 +43,14 @@ def _read_text(path):
     raise SystemExit("не удалось определить кодировку файла %s" % path)
 
 
+def _save_profile(a, cfg):
+    """--save-profile: записать итоговые настройки (профиль + ключи)."""
+    path = getattr(a, "save_profile", None)
+    if path:
+        cfg.save(path)
+        _out("профиль сохранён: %s" % path)
+
+
 # --------------------------------------------------------------- команды
 
 def cmd_text(a):
@@ -86,6 +94,9 @@ def cmd_text(a):
         a.font = FontSet.CALLIG
     fs = FontSet.load(a.font) if a.font else FontSet()
     fs.flat = cfg.curve_flatness
+    if a.font:
+        cfg.font_path = a.font
+    _save_profile(a, cfg)
     hu = Human(cfg.human)
     report = {}
     pages = L.build_pages(text, fs, cfg.page, hu, report=report)
@@ -133,6 +144,7 @@ def cmd_draw(a):
         d.invert = True
     if a.mirror:
         d.mirror = True
+    _save_profile(a, cfg)
     src = DR.ArtSource(a.input)
     _out(src.describe())
     art, _box = DR.build_art(src, [], d, cfg.page)
@@ -332,6 +344,8 @@ def build_parser():
     t.add_argument("--font", help="JSON своего почерка или callig — "
                                    "встроенная каллиграфическая пропись")
     t.add_argument("--profile", help="JSON профиля настроек")
+    t.add_argument("--save-profile", dest="save_profile",
+                   help="сохранить итоговые настройки в JSON профиля")
     t.add_argument("--preset", choices=list(HUMAN_PRESETS), help="набор реализма")
     t.add_argument("--sheet", help="формат листа: " + ", ".join(SHEETS))
     t.add_argument("--size-mm", dest="size_mm", type=float,
@@ -375,6 +389,8 @@ def build_parser():
     dr.add_argument("-i", "--input", required=True, help="PNG/JPG/... или SVG")
     dr.add_argument("-o", "--output", required=True, help="куда писать .gcode")
     dr.add_argument("--profile", help="JSON профиля настроек")
+    dr.add_argument("--save-profile", dest="save_profile",
+                    help="сохранить итоговые настройки в JSON профиля")
     dr.add_argument("--sheet", help="формат листа: " + ", ".join(SHEETS))
     dr.add_argument("--mode", choices=list(DR.MODES), help="как превращать в линии")
     dr.add_argument("--threshold", type=float, help="порог тёмного 0..1")

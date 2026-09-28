@@ -178,6 +178,65 @@ check("почерк подхватился при следующем запус�
       app2.fontset.count("Ы") == 2 and app2.cfg.font_path == fp,
       "начертаний Ы: %d" % app2.fontset.count("Ы"))
 app2.destroy()
+
+# настройки из окна, текст и переключатели — без всякого профиля
+app._profile_path = ""
+app.cfg.page.size_mm = 8.25
+app.cfg.pen.z_draw = -0.35
+for f in app.fields:
+    f.pull()
+app.txt.delete("1.0", "end")
+app.txt.insert("1.0", "Текст с прошлого раза")
+app.v_travel.set(True)
+app.v_preset.set("Небрежно")
+app.nb.select(app.tab_page)
+app._save_state()
+check("нет недописанного временного файла", not _os.path.exists(app._state_file() + ".tmp"))
+app3 = App()
+app3.withdraw()
+for _ in range(60):
+    app3.update()
+    if app3._photo is not None:
+        break
+    time.sleep(0.02)
+check("настройки окна восстановились без профиля",
+      app3.cfg.page.size_mm == 8.25 and app3.cfg.pen.z_draw == -0.35,
+      "size %.2f, z %.2f" % (app3.cfg.page.size_mm, app3.cfg.pen.z_draw))
+check("поля ввода показывают восстановленное",
+      any(f.attr == "size_mm" and abs(float(f.var.get()) - 8.25) < 1e-6
+          for f in app3.fields))
+check("текст восстановился", app3.txt.get("1.0", "end-1c") == "Текст с прошлого раза")
+check("переключатели и вкладка восстановились",
+      app3.v_travel.get() and app3.v_preset.get() == "Небрежно"
+      and app3.nb.select() == str(app3.tab_page))
+
+# автосохранение: правка без закрытия окна попадает в файл сама
+app3.cfg.page.size_mm = 9.5
+for f in app3.fields:
+    f.pull()
+app3.rebuild()
+for _ in range(150):
+    app3.update()
+    if getattr(app3, "_autosave_id", 1) is None:
+        break
+    time.sleep(0.02)
+import json as _json
+saved = _json.load(open(app3._state_file(), encoding="utf-8"))
+check("правка сохраняется сама, без закрытия окна",
+      saved["config"]["page"]["size_mm"] == 9.5)
+
+# сброс настроек: всё по умолчанию, почерк остаётся
+import tkinter.messagebox as _mb
+_ask = _mb.askyesno
+_mb.askyesno = lambda *a, **k: True
+try:
+    app3.reset_settings()
+finally:
+    _mb.askyesno = _ask
+from hw.core.config import Config as _Cfg
+check("сброс возвращает настройки по умолчанию, почерк на месте",
+      app3.cfg.page.size_mm == _Cfg().page.size_mm and app3.cfg.font_path == fp)
+app3.destroy()
 try:
     _os.remove(app._state_file()); _os.remove(fp)
 except OSError:

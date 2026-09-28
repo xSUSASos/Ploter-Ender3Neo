@@ -154,6 +154,15 @@ try:
     check("превью SVG создано", os.path.getsize(os.path.join(tmp, "a.svg")) > 500)
     check("превью PNG создано", os.path.getsize(os.path.join(tmp, "a.png")) > 500)
 
+    prof = os.path.join(tmp, "p.json")
+    code, out = run("text", "--text", "Профиль", "-o", os.path.join(tmp, "p.gcode"),
+                    "--size-mm", "7.5", "--z-draw", "-0.4", "--save-profile", prof)
+    from hw.core.config import Config as _C
+    pc = _C.load(prof) if os.path.exists(prof) else None
+    check("--save-profile сохраняет настройки из ключей",
+          code == 0 and pc is not None and pc.page.size_mm == 7.5
+          and pc.pen.z_draw == -0.4)
+
     code, out = run("text", "--text", "x " * 400, "-o", os.path.join(tmp, "b.gcode"),
                     "--autofit")
     check("автоподбор сообщает о неудаче", "ВНИМАНИЕ" in out or code == 0,

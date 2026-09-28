@@ -370,7 +370,20 @@ class App(tk.Tk):
             return ""
         got = []
         prof = st.get("profile")
-        if prof and os.path.exists(prof):
+        conf = st.get("config")
+        if isinstance(conf, dict):
+            # все настройки окна с прошлого раза — даже не сохранённые в профиль
+            try:
+                self.cfg = Config.from_dict(conf)
+                for fl in self.fields:
+                    fl.pull()
+                self._profile_path = prof or ""
+                got.append("настройки")
+            except (TypeError, ValueError, KeyError, AttributeError):
+                self.cfg = Config()
+                for fl in self.fields:
+                    fl.pull()
+        elif prof and os.path.exists(prof):
             try:
                 self.cfg = Config.load(prof)
                 for fl in self.fields:
@@ -392,6 +405,12 @@ class App(tk.Tk):
             self._sketch = []
         if self._sketch:
             got.append("эскиз")
+        text = st.get("text")
+        if isinstance(text, str):
+            self.txt.delete("1.0", "end")
+            self.txt.insert("1.0", text)
+            got.append("текст")
+        self._restore_ui(st.get("ui") or {})
         geom = st.get("geometry")
         if geom:
             try:
@@ -400,19 +419,108 @@ class App(tk.Tk):
                 pass
         return ", ".join(got)
 
-    def _save_state(self):
+    # переключатели окна, которых нет в Config: тоже переживают перезапуск
+    _UI_VARS = ("v_travel", "v_margins", "v_fallback", "v_sheet", "v_preset",
+                "v_port", "v_baud", "v_ink", "v_delines", "v_cyr", "v_lat",
+                "v_dig", "v_pun", "v_variants")
+
+    def _ui_state(self):
+        ui = {}
+        for name in self._UI_VARS:
+            var = getattr(self, name, None)
+            if var is not None:
+                try:
+                    ui[name] = var.get()
+                except tk.TclError:
+                    pass
         try:
-            with open(self._state_file(), "w", encoding="utf-8") as f:
+            tabs = self.nb.tabs()
+            ui["tab"] = tabs.index(self.nb.select())
+        except (tk.TclError, ValueError, AttributeError):
+            pass
+        ui["page_index"] = self.page_index
+        return ui
+
+    def _restore_ui(self, ui):
+        for name in self._UI_VARS:
+            var = getattr(self, name, None)
+            if var is not None and name in ui:
+                try:
+                    var.set(ui[name])
+                except (tk.TclError, TypeError, ValueError):
+                    pass
+        self.fontset.builtin_fallback = bool(self.v_fallback.get())
+        try:
+            tabs = self.nb.tabs()
+            i = int(ui.get("tab", -1))
+            if 0 <= i < len(tabs):
+                self.nb.select(tabs[i])
+                self._paint_nav()
+        except (tk.TclError, TypeError, ValueError, AttributeError):
+            pass
+        try:
+            self.page_index = max(0, int(ui.get("page_index", 0)))
+        except (TypeError, ValueError):
+            pass
+
+    def _save_state(self):
+        """
+        Записать всё, что нужно для следующего запуска: настройки, текст,
+        почерк, рисунок, эскиз, переключатели окна. Пишем во временный
+        файл и подменяем им старый — оборванная запись не испортит
+        настройки.
+        """
+        self._autosave_id = None
+        try:
+            self._collect()
+        except Exception:                               # noqa: BLE001
+            pass                                        # недописанное поле
+        path = self._state_file()
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"profile": self._profile_path,
                            "font": self.cfg.font_path,
                            "theme": "dark" if self.v_dark.get() else "light",
                            "art": self._art.path if self._art else "",
                            "sketch": [[[round(x, 3), round(y, 3)] for x, y in q]
                                       for q in self._sketch],
-                           "geometry": self.winfo_geometry()},
+                           "geometry": self.winfo_geometry(),
+                           "config": self.cfg.to_dict(),
+                           "text": self.txt.get("1.0", "end-1c"),
+                           "ui": self._ui_state()},
                           f, ensure_ascii=False, indent=1)
-        except OSError:
-            pass
+            os.replace(tmp, path)
+        except (OSError, tk.TclError):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def _autosave(self):
+        """Сохранить состояние через пару секунд тишины после правки."""
+        if getattr(self, "_autosave_id", None) is not None:
+            self.after_cancel(self._autosave_id)
+        self._autosave_id = self.after(2000, self._save_state)
+
+    def reset_settings(self):
+        """Все настройки — по умолчанию. Текст, почерк и рисунок остаются."""
+        if not messagebox.askyesno(
+                "Сбросить настройки",
+                "Вернуть все настройки к значениям по умолчанию?\n"
+                "Текст, почерк и рисунок останутся."):
+            return
+        font = self.cfg.font_path
+        self.cfg = Config()
+        self.cfg.font_path = font
+        for fl in self.fields:
+            fl.pull()
+        self._profile_path = ""
+        self.v_sheet.set("A5")
+        self.v_preset.set("Обычно")
+        self.rebuild()
+        self._save_state()
+        self._say(self.status.cget("text") + "   ·   настройки сброшены")
 
     # ------------------------------------------------------------ каркас
     def _build(self):
@@ -540,6 +648,7 @@ class App(tk.Tk):
         m.add_separator()
         m.add_command(label="Сохранить профиль настроек…", command=self.save_profile)
         m.add_command(label="Загрузить профиль настроек…", command=self.load_profile)
+        m.add_command(label="Сбросить настройки…", command=self.reset_settings)
         b = self.btn_export
         try:
             m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
@@ -1568,6 +1677,7 @@ class App(tk.Tk):
         except Exception as e:                          # noqa: BLE001
             self._say("ошибка: %s" % e, error=True)
             traceback.print_exc()
+        self._autosave()
 
     def _layout(self, text):
         """Текст и рисунок -> страницы. Рисунок кладётся в Page.art."""
@@ -1752,6 +1862,8 @@ class App(tk.Tk):
         m = self._menu()
         m.add_command(label="Сохранить профиль…", command=self.save_profile)
         m.add_command(label="Загрузить профиль…", command=self.load_profile)
+        m.add_separator()
+        m.add_command(label="Сбросить настройки…", command=self.reset_settings)
         try:
             m.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
         finally:
@@ -2809,6 +2921,8 @@ class App(tk.Tk):
             if not messagebox.askyesno("Идёт печать", "Прервать и выйти?"):
                 return
             self.link.abort()
+        if getattr(self, "_autosave_id", None) is not None:
+            self.after_cancel(self._autosave_id)
         self._save_state()
         self.destroy()
 
