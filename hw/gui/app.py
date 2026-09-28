@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 import traceback
+from dataclasses import astuple
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -1575,8 +1576,7 @@ class App(tk.Tk):
         self._art_note = ""
         box = None
         if d.enabled and (self._art is not None or self._sketch):
-            art, box = DR.build_art(self._art, self._sketch, d, self.cfg.page,
-                                    seed=self.cfg.human.seed or 1)
+            art, box = self._build_art_cached(d)
         mode = d.layout if art else "over"
         if mode == "alone":
             pages = [L.Page(size_mm=self.cfg.page.size_mm)]
@@ -1599,6 +1599,22 @@ class App(tk.Tk):
         elif d.enabled is False and (self._art is not None or self._sketch):
             self._art_note = "   ·   рисунок выключен"
         return pages
+
+    def _build_art_cached(self, d):
+        """
+        DR.build_art с памятью на последний вызов: правка текста не трогает
+        рисунок, а упрощение, дрожание и порядок линий на большой картинке
+        занимают заметное время на каждое нажатие клавиши.
+        """
+        seed = self.cfg.human.seed or 1
+        key = (astuple(d), astuple(self.cfg.page), seed,
+               tuple(tuple(map(tuple, st)) for st in self._sketch))
+        hit = getattr(self, "_art_memo", None)
+        if hit is not None and hit[0] is self._art and hit[1] == key:
+            return hit[2]
+        res = DR.build_art(self._art, self._sketch, d, self.cfg.page, seed=seed)
+        self._art_memo = (self._art, key, res)
+        return res
 
     def _fit_note(self, res):
         m, pg = self.cfg.machine, self.cfg.page

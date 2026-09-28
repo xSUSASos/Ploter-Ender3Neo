@@ -40,11 +40,23 @@ def _sheet_turn(cfg):
     return c, s, -min(xs), -min(ys), max(xs) - min(xs), max(ys) - min(ys)
 
 
+def bed_mapper(cfg):
+    """
+    Функция «точка листа -> точка стола» с поворотом, посчитанным один раз.
+    Для массовых вызовов: sheet_to_bed пересчитывает поворот на каждой точке.
+    """
+    c, s, dx, dy, _w, _h = _sheet_turn(cfg)
+    ox, oy = cfg.origin_x, cfg.origin_y
+
+    def to_bed(pt):
+        x, y = pt
+        return (ox + c * x - s * y + dx, oy + s * x + c * y + dy)
+    return to_bed
+
+
 def sheet_to_bed(pt, cfg):
     """Точка листа (мм, Y вверх) -> точка стола."""
-    x, y = pt
-    c, s, dx, dy, _w, _h = _sheet_turn(cfg)
-    return (cfg.origin_x + c * x - s * y + dx, cfg.origin_y + s * x + c * y + dy)
+    return bed_mapper(cfg)(pt)
 
 
 def sheet_extent(cfg):
@@ -217,34 +229,54 @@ class GcodeWriter:
 
     # --------------------------------------------------------- штрихи
     def draw_strokes(self, strokes, comment=None, feed=None):
-        p, page = self.pen, self.page
+        p = self.pen
         feed = int(feed or p.feed_draw)
         if comment:
             self._emit("; %s" % comment)
+        to_bed = bed_mapper(self.page)
+        pressure = self.human is not None and self.human.cfg.pressure > 0
+        hop = p.hop_threshold
+        emit = self.out.append
+        hypot = math.hypot
+        g1 = "G1 X%.3f Y%.3f F" + str(feed)
+        per_s = feed / 60.0                   # как в _time(): мм/мин -> мм/с
         prev_end = None
         for s in strokes:
             if len(s) < 2:
                 continue
-            pts = [sheet_to_bed(q, page) for q in s]
+            pts = [to_bed(q) for q in s]
             x0, y0 = pts[0]
 
             # если следующий штрих начинается рядом — не поднимаем перо на всю
             near = (prev_end is not None
                     and math.hypot(x0 - prev_end[0], y0 - prev_end[1])
-                    <= p.hop_threshold)
+                    <= hop)
             self.pen_up(full=not near)
             self._g0(x0, y0, p.feed_travel)
             self.pen_down()
 
-            run = 0.0
-            for i in range(1, len(pts)):
-                x, y = pts[i]
-                if self.human is not None and self.human.cfg.pressure > 0:
+            if pressure:
+                run = 0.0
+                for i in range(1, len(pts)):
+                    x, y = pts[i]
                     run += math.dist(pts[i - 1], pts[i])
                     self._g1(x, y, feed,
                              z=self.human.pressure_z(p.z_draw, run))
-                else:
-                    self._g1(x, y, feed)
+            else:
+                # горячий цикл: ровно то же, что _g1 без Z, но без вызова
+                # функции на каждую точку (суммы копятся в том же порядке)
+                dm, sec = self.draw_mm, self.seconds
+                px, py = x0, y0
+                for x, y in pts[1:]:
+                    emit(g1 % (x, y))
+                    d = hypot(x - px, y - py)
+                    dm += d
+                    if per_s > 0 and d > 0:
+                        sec += d / per_s
+                    px, py = x, y
+                self.draw_mm, self.seconds = dm, sec
+                self._x, self._y = px, py
+                self.points += len(pts) - 1
             prev_end = pts[-1]
 
     # ------------------------------------------------------------ сборка
@@ -284,15 +316,14 @@ class GcodeWriter:
             warnings=tuple(self.warnings))
 
     def _bbox(self, pages):
-        xs, ys = [], []
-        for pg in pages:
-            for s in list(pg.strokes) + list(pg.guides) + list(getattr(pg, "art", [])):
-                for q in s:
-                    bx, by = sheet_to_bed(q, self.page)
-                    xs.append(bx)
-                    ys.append(by)
-        if not xs:
+        to_bed = bed_mapper(self.page)
+        pts = [to_bed(q) for pg in pages
+               for s in (list(pg.strokes) + list(pg.guides)
+                         + list(getattr(pg, "art", None) or []))
+               for q in s]
+        if not pts:
             return (0.0, 0.0, 0.0, 0.0)
+        xs, ys = zip(*pts)
         return (min(xs), min(ys), max(xs), max(ys))
 
     def _check_bounds(self, bb):
@@ -321,12 +352,31 @@ class GcodeWriter:
 
 # ------------------------------------------------------------- проверка
 
+# Грубый фильтр по тексту в верхнем регистре: всё, на что сработает
+# построчная проверка, ему заведомо соответствует. Нет совпадений во всём
+# тексте — построчно не проверяем (в разы быстрее на больших файлах).
+# Строки, разделённые не \n (а \r, \x0b, \u2028...), — сразу построчно.
+_SUSPECT_CMD = re.compile(r"^[^\S\n]*(?:M1(?:04|09|40|90)|M303|M600|G[23] )",
+                          re.MULTILINE)
+_SUSPECT_E = re.compile(r"E-?\d")
+_ODD_EOL = re.compile("[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
+def _maybe_bad(text):
+    if _ODD_EOL.search(text):
+        return True
+    up = text.upper()
+    return bool(_SUSPECT_CMD.search(up) or _SUSPECT_E.search(up))
+
+
 def validate(text):
     """
     Проверить готовый G-code на опасные команды.
     -> список найденных проблем (пустой = всё чисто).
     """
     bad = []
+    if not _maybe_bad(text):
+        return bad
     for i, line in enumerate(text.splitlines(), 1):
         code = line.split(";", 1)[0].strip()
         if not code:

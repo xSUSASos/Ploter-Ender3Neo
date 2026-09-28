@@ -92,8 +92,9 @@ def to_svg(pages, cfg, px_per_mm=4.0, show_travel=False, show_margins=True,
 def _path(pts, cfg, color, width):
     if len(pts) < 2:
         return ""
-    d = "M %.2f %.2f " % (pts[0][0], _y(cfg, pts[0][1]))
-    d += " ".join("L %.2f %.2f" % (x, _y(cfg, y)) for (x, y) in pts[1:])
+    h = cfg.sheet_h
+    d = "M %.2f %.2f " % (pts[0][0], h - pts[0][1])
+    d += " ".join(["L %.2f %.2f" % (x, h - y) for (x, y) in pts[1:]])
     return ('<path d="%s" fill="none" stroke="%s" stroke-width="%.2f" '
             'stroke-linecap="round" stroke-linejoin="round"/>' % (d, color, width))
 
@@ -115,8 +116,13 @@ def to_image(page, cfg, px_per_mm=4.0, show_travel=False, show_margins=True,
     d = ImageDraw.Draw(im)
     d.rectangle([0, 0, W - 1, H - 1], fill=SHEET, outline=EDGE)
 
+    sh = cfg.sheet_h
+
     def xy(pt):
-        return (pt[0] * px_per_mm, _y(cfg, pt[1]) * px_per_mm)
+        return (pt[0] * px_per_mm, (sh - pt[1]) * px_per_mm)
+
+    def line(s):
+        return [(x * px_per_mm, (sh - y) * px_per_mm) for x, y in s]
 
     if getattr(cfg, "grid", False) and cfg.grid_cell > 0.5:
         # клетка тетради — только для глаз, в G-code её нет. Горизонтали
@@ -139,12 +145,12 @@ def to_image(page, cfg, px_per_mm=4.0, show_travel=False, show_margins=True,
 
     for s in page.guides:
         if len(s) > 1:
-            d.line([xy(q) for q in s], fill=GUIDE, width=1)
+            d.line(line(s), fill=GUIDE, width=1)
 
     aw = max(1, int(round(_art_width(cfg, art_width) * px_per_mm)))
     for s in getattr(page, "art", []):
         if len(s) > 1:
-            d.line([xy(q) for q in s], fill=INK, width=aw, joint="curve")
+            d.line(line(s), fill=INK, width=aw, joint="curve")
 
     if show_travel:
         prev = None
@@ -159,7 +165,7 @@ def to_image(page, cfg, px_per_mm=4.0, show_travel=False, show_margins=True,
         w = max(1, int(round(page.pen_mm * px_per_mm)))
     for s in page.strokes:
         if len(s) > 1:
-            d.line([xy(q) for q in s], fill=INK, width=w, joint="curve")
+            d.line(line(s), fill=INK, width=w, joint="curve")
     return im
 
 
@@ -176,7 +182,7 @@ def bed_image(page, cfg, size_px=230):
     окажутся текст и рисунок. Верхний край листа выделен цветом — по нему
     видно, куда смотрит лист. cfg — полный Config (нужен размер стола).
     """
-    from .gcode import sheet_to_bed
+    from .gcode import bed_mapper
     m, pc = cfg.machine, cfg.page
     pad = 6
     s = (size_px - 2 * pad) / max(m.bed_x, m.bed_y, 1.0)
@@ -190,12 +196,13 @@ def bed_image(page, cfg, size_px=230):
     d.rectangle([xy((0, m.bed_y)), xy((m.bed_x, 0))], fill="#c9ced6",
                 outline="#8a929e")
     w, h = pc.sheet_w, pc.sheet_h
-    corners = [sheet_to_bed(c, pc) for c in ((0, 0), (w, 0), (w, h), (0, h))]
+    to_bed = bed_mapper(pc)
+    corners = [to_bed(c) for c in ((0, 0), (w, 0), (w, h), (0, h))]
     d.polygon([xy(c) for c in corners], fill=SHEET, outline="#7d8694")
     d.line([xy(corners[3]), xy(corners[2])], fill="#d9534f", width=3)
     for s_ in list(getattr(page, "art", [])) + list(page.strokes):
         if len(s_) > 1:
-            d.line([xy(sheet_to_bed(q, pc)) for q in s_], fill=INK, width=1)
+            d.line([xy(to_bed(q)) for q in s_], fill=INK, width=1)
     r = 4
     ox, oy = xy((0, 0))
     d.ellipse([ox - r, oy - r, ox + r, oy + r], outline="#d9534f", width=2)

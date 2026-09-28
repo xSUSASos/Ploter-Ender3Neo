@@ -34,8 +34,6 @@ try:
 except ImportError:                                   # pragma: no cover
     cv2 = None
 
-from scipy import ndimage
-
 from . import vectorize as VZ
 from . import humanize as HM
 
@@ -533,7 +531,7 @@ class ArtSource:
             if hi - lo > 0.04:
                 g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
         if d.blur > 0:
-            g = ndimage.gaussian_filter(g, float(d.blur))
+            g = VZ.ndimage.gaussian_filter(g, float(d.blur))
         g = g.astype(np.float32)
         self._cache[key] = g
         return g

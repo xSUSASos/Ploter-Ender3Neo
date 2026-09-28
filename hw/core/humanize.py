@@ -83,26 +83,37 @@ def tremor(strokes, amp, wavelength, rng, step=None):
     step = step or max(0.25, wavelength / 6.0)
     nx = Noise1D(rng, octaves=3, base=2.0 * math.pi / max(wavelength, 1e-6))
     ny = Noise1D(rng, octaves=3, base=2.0 * math.pi / max(wavelength, 1e-6))
+    # шум считается прямо здесь, без вызова Noise1D на каждую точку:
+    # те же слагаемые в том же порядке, поэтому результат тот же до бита
+    xt, yt = tuple(nx.terms), tuple(ny.terms)
+    xn, yn = nx.norm, ny.norm
+    amp_b = amp * 0.35
+    sin, hypot, dist = math.sin, math.hypot, math.dist
     out = []
     for s in strokes:
         p = resample(s, step)
-        if len(p) < 2:
+        n = len(p)
+        if n < 2:
             out.append(list(s))
             continue
+        last = n - 1
         acc = 0.0
         ns = []
-        for i, (x, y) in enumerate(p):
+        prev = p[0]
+        for i in range(n):
+            x, y = cur = p[i]
             if i:
-                acc += math.dist(p[i - 1], p[i])
-            j = min(i + 1, len(p) - 1)
-            k = max(i - 1, 0)
-            tx, ty = p[j][0] - p[k][0], p[j][1] - p[k][1]
-            ln = math.hypot(tx, ty) or 1.0
+                acc += dist(prev, cur)
+            qj = p[i + 1] if i < last else cur
+            qk = prev
+            tx, ty = qj[0] - qk[0], qj[1] - qk[1]
+            ln = hypot(tx, ty) or 1.0
             # нормаль к касательной
             ox, oy = -ty / ln, tx / ln
-            a = amp * nx(acc)
-            b = amp * 0.35 * ny(acc)
+            a = amp * (sum([am * sin(acc * f + ph) for f, ph, am in xt]) / xn)
+            b = amp_b * (sum([am * sin(acc * f + ph) for f, ph, am in yt]) / yn)
             ns.append((x + ox * a + b, y + oy * a))
+            prev = cur
         out.append(ns)
     return out
 

@@ -408,18 +408,19 @@ def _orient_score(warp, spec, s):
     return float(255.0 - patch.mean())
 
 
-def _line_offset(prof, centre):
+def _line_offset(prof, centre, i=None, med=None):
     """
     Найти в профиле тёмную линию рядом с ожидаемым местом.
     prof — медианная «темнота» поперёк линии, centre — где линия должна
     быть по гомографии. -> (сдвиг в пикселях, контраст) или None, если
     линии не видно (тогда остаёмся при расчётном положении).
+    i, med — argmax и медиана профиля, если уже посчитаны пачкой.
     """
     if len(prof) < 5:
         return None
-    i = int(np.argmax(prof))
+    i = int(np.argmax(prof)) if i is None else int(i)
     peak = float(prof[i])
-    contrast = peak - float(np.median(prof))
+    contrast = peak - float(np.median(prof) if med is None else med)
     # рамка печатается светло-серым (~0.84 от бумаги): ждём провал хотя бы 3 %
     if contrast < 0.03:
         return None
@@ -452,16 +453,24 @@ def _find_line(dark, a0, a1, across, reach, horizontal):
         return None
     mid = 0.5 * (a[0] + a[-1])
     base = int(round(across - reach))
-    span = np.arange(int(2 * reach) + 1)[:, None]
+    span = np.arange(int(2 * reach) + 1)
+    # все наклоны разом: shift[k, j] — смещение линии в точке a[j]
+    shift = np.round(_SLOPES[:, None] * (a - mid)[None, :]).astype(int)
+    lo, hi = base + span[0], base + span[-1]
+    ok = (lo + shift.min(axis=1) >= 0) & (hi + shift.max(axis=1) < lim)
+    if not ok.any():
+        return None
+    ks = np.flatnonzero(ok)
+    idx = base + span[None, :, None] + shift[ks][:, None, :]   # (наклон, поперёк, вдоль)
+    vals = dark[idx, a] if horizontal else dark[a, idx]
+    profs = np.median(vals, axis=2)
+    top = profs.argmax(axis=1)
+    meds = np.median(profs, axis=1)
     best = None
-    for k in _SLOPES:
-        idx = base + span + np.round(k * (a - mid)).astype(int)[None, :]
-        if idx.min() < 0 or idx.max() >= lim:
-            continue
-        vals = dark[idx, a[None, :]] if horizontal else dark[a[None, :], idx]
-        res = _line_offset(np.median(vals, axis=1), across - base)
+    for n, k in enumerate(ks):
+        res = _line_offset(profs[n], across - base, top[n], meds[n])
         if res and (best is None or res[1] > best[2]):
-            best = (res[0], float(k), res[1])
+            best = (res[0], float(_SLOPES[k]), res[1])
     return None if best is None else (best[0], best[1])
 
 
@@ -489,6 +498,15 @@ def _grid_offsets(rect, spec, px_per_mm, search_mm=2.6, passes=4):
     # сильный изгиб уводит середину листа дальше окна поиска; поэтому
     # ищем в несколько проходов, каждый раз вокруг того места, куда
     # указывают уже найденные соседи, — поправка «доползает» от краёв
+    # между проходами большинство отрезков ищется на том же месте —
+    # не пересчитываем одинаковые вызовы
+    memo = {}
+
+    def find(*args):
+        if args not in memo:
+            memo[args] = _find_line(dark, *args)
+        return memo[args]
+
     pdy = [[0.0] * cols for _ in range(rows + 1)]
     pdx = [[0.0] * (cols + 1) for _ in range(rows)]
     psy = [[0.0] * cols for _ in range(rows + 1)]
@@ -503,7 +521,7 @@ def _grid_offsets(rect, spec, px_per_mm, search_mm=2.6, passes=4):
                 y = (spec.grid_top + r * spec.cell_h) * s + pdy[r][c]
                 xa = (spec.grid_left + (c + 0.12) * spec.cell_w) * s
                 xb = (spec.grid_left + (c + 0.88) * spec.cell_w) * s
-                got = _find_line(dark, xa, xb, y, reach, True)
+                got = find(xa, xb, y, reach, True)
                 if got:
                     dy[r][c], sy[r][c] = pdy[r][c] + got[0], got[1]
         for c in range(cols + 1):
@@ -511,7 +529,7 @@ def _grid_offsets(rect, spec, px_per_mm, search_mm=2.6, passes=4):
                 x = (spec.grid_left + c * spec.cell_w) * s + pdx[r][c]
                 ya = (spec.grid_top + (r + 0.12) * spec.cell_h) * s
                 yb = (spec.grid_top + (r + 0.88) * spec.cell_h) * s
-                got = _find_line(dark, ya, yb, x, reach, False)
+                got = find(ya, yb, x, reach, False)
                 if got:
                     dx[r][c], sx[r][c] = pdx[r][c] + got[0], got[1]
         ndy, ndx = _fill_offsets(dy, 3.0), _fill_offsets(dx, 3.0)

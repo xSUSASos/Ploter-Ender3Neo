@@ -23,7 +23,18 @@ try:
 except ImportError:                                   # pragma: no cover
     cv2 = None
 
-from scipy import ndimage
+
+# scipy.ndimage грузится ~0.3 с, а окну на старте он не нужен
+class _LazyNdimage:
+    """Подгружает scipy.ndimage при первом обращении и подменяет себя им."""
+
+    def __getattr__(self, name):
+        from scipy import ndimage as mod
+        globals()["ndimage"] = mod
+        return getattr(mod, name)
+
+
+ndimage = _LazyNdimage()
 
 
 # --------------------------------------------------------- подготовка кадра
@@ -330,27 +341,46 @@ def _nb_stack(p):
             p[:-2, :-2])    # P9  NW
 
 
+def _thin_lut(step):
+    """
+    Условие удаления пикселя для каждой из 256 комбинаций соседей
+    P2..P9 (бит i — сосед P(i+2)). Те же условия Zhang–Suen, что и раньше,
+    только посчитанные один раз, а не на каждом проходе по картинке.
+    """
+    lut = np.zeros(256, bool)
+    for code in range(256):
+        P2, P3, P4, P5, P6, P7, P8, P9 = ((code >> i) & 1 for i in range(8))
+        seq = [P2, P3, P4, P5, P6, P7, P8, P9, P2]
+        B = sum(seq[:8])
+        A = sum(1 for i in range(8) if seq[i] == 0 and seq[i + 1] == 1)
+        if step == 0:
+            c1 = (P2 * P4 * P6) == 0
+            c2 = (P4 * P6 * P8) == 0
+        else:
+            c1 = (P2 * P4 * P8) == 0
+            c2 = (P2 * P6 * P8) == 0
+        # B >= 3 вместо 2 — поправка Лю–Ванга: классический Zhang–Suen
+        # целиком стирает диагональ вида «/» (нижние плечи «»», «и»)
+        lut[code] = 3 <= B <= 6 and A == 1 and c1 and c2
+    return lut
+
+
+_THIN_LUT = (_thin_lut(0), _thin_lut(1))
+
+
 def thin(mask, max_iter=200):
     """Утоньшение до линии в 1 пиксель (алгоритм Zhang–Suen)."""
     img = mask.astype(np.uint8)
+    if img.size == 0:
+        return _drop_stairs(img.astype(bool))
     for _ in range(max_iter):
         changed = False
         for step in (0, 1):
             p = np.pad(img, 1)
-            P2, P3, P4, P5, P6, P7, P8, P9 = _nb_stack(p)
-            seq = [P2, P3, P4, P5, P6, P7, P8, P9, P2]
-            B = P2 + P3 + P4 + P5 + P6 + P7 + P8 + P9
-            A = sum(((seq[i] == 0) & (seq[i + 1] == 1)).astype(np.uint8)
-                    for i in range(8))
-            if step == 0:
-                c1 = (P2 * P4 * P6) == 0
-                c2 = (P4 * P6 * P8) == 0
-            else:
-                c1 = (P2 * P4 * P8) == 0
-                c2 = (P2 * P6 * P8) == 0
-            # B >= 3 вместо 2 — поправка Лю–Ванга: классический Zhang–Suen
-            # целиком стирает диагональ вида «/» (нижние плечи «»», «и»)
-            kill = (img == 1) & (B >= 3) & (B <= 6) & (A == 1) & c1 & c2
+            code = np.zeros(img.shape, np.uint8)
+            for bit, nb in enumerate(_nb_stack(p)):
+                code |= nb << bit
+            kill = (img == 1) & _THIN_LUT[step][code]
             if kill.any():
                 img[kill] = 0
                 changed = True
@@ -379,10 +409,12 @@ def _drop_stairs(sk):
     через диагональ.
     """
     s = np.pad(sk, 1)
-    for y, x in np.argwhere(s):
+    on = set(map(tuple, np.argwhere(s).tolist()))
+    for y, x in sorted(on):
         for need, empty in _STAIRS:
-            if all(s[y + dy, x + dx] for dy, dx in need) and \
-                    not any(s[y + dy, x + dx] for dy, dx in empty):
+            if all((y + dy, x + dx) in on for dy, dx in need) and \
+                    not any((y + dy, x + dx) in on for dy, dx in empty):
+                on.discard((y, x))
                 s[y, x] = False
                 break
     return s[1:-1, 1:-1]
@@ -410,10 +442,15 @@ def trace_skeleton(sk, min_branch=4):
     Обрабатываются и открытые ветви (от конца/развилки до конца/развилки),
     и замкнутые петли (буквы о, а, б, ф).
     """
-    pts = [tuple(p) for p in np.argwhere(sk)]
+    pts = [tuple(p) for p in np.argwhere(sk).tolist()]
     if not pts:
         return []
-    deg = {p: len(_neighbours(sk, *p)) for p in pts}
+    # соседи каждой точки скелета — один раз, через множество
+    # (индексация numpy по одному пикселю в разы медленнее)
+    on = set(pts)
+    nbrs = {p: [q for q in ((p[0] + dy, p[1] + dx) for dy, dx in _N8) if q in on]
+            for p in pts}
+    deg = {p: len(v) for p, v in nbrs.items()}
     nodes = [p for p in pts if deg[p] != 2]
 
     used = set()                      # неориентированные рёбра
@@ -428,7 +465,7 @@ def trace_skeleton(sk, min_branch=4):
         used.add(edge(start, first))
         prev, cur = start, first
         while deg.get(cur, 0) == 2:
-            nbs = [q for q in _neighbours(sk, *cur) if q != prev]
+            nbs = [q for q in nbrs[cur] if q != prev]
             if not nbs:
                 break
             nxt = nbs[0]
@@ -441,7 +478,7 @@ def trace_skeleton(sk, min_branch=4):
         return path
 
     for nd in nodes:
-        for nb in _neighbours(sk, *nd):
+        for nb in nbrs[nd]:
             if edge(nd, nb) in used:
                 continue
             paths.append(walk(nd, nb))
@@ -450,12 +487,12 @@ def trace_skeleton(sk, min_branch=4):
     for p in pts:
         if deg[p] != 2:
             continue
-        nbs = _neighbours(sk, *p)
+        nbs = nbrs[p]
         if all(edge(p, q) in used for q in nbs):
             continue
         nb = next(q for q in nbs if edge(p, q) not in used)
         path = walk(p, nb)
-        if len(path) > 2 and path[-1] != p and p in _neighbours(sk, *path[-1]):
+        if len(path) > 2 and path[-1] != p and p in nbrs[path[-1]]:
             path.append(p)
         paths.append(path)
 
@@ -585,16 +622,18 @@ DEFAULTS = dict(
 
 
 def vectorize_mask(mask, min_branch=4, smooth=5, simplify_tol=0.8,
-                   merge_gap=2.5, min_path_len=3.0, spur_factor=1.8):
+                   merge_gap=2.5, min_path_len=3.0, spur_factor=1.8, sw=None):
     """
     Готовая бинарная маска -> список полилиний в пикселях.
 
     Пороги обрезки привязаны к толщине штриха: одна и та же настройка
     одинаково работает и для фото 800 px, и для скана 3000 px.
+    sw — толщина штриха этой маски, если уже посчитана.
     """
     if not mask.any():
         return []
-    sw = stroke_width(mask)
+    if sw is None:
+        sw = stroke_width(mask)
     body, dots = split_dots(mask, sw)
     paths = []
     if body.any():
@@ -624,20 +663,28 @@ def vectorize_mask(mask, min_branch=4, smooth=5, simplify_tol=0.8,
     return out
 
 
+class _PointPool:
+    """Все точки всех путей одним массивом — для «есть ли чужая точка рядом»."""
+
+    def __init__(self, paths):
+        arrs = [np.asarray(p, float).reshape(-1, 2) for p in paths]
+        self.xy = np.concatenate(arrs) if arrs else np.zeros((0, 2))
+        self.owner = np.repeat(np.arange(len(arrs)), [len(a) for a in arrs])
+
+    def near_other(self, i, pt, tol):
+        """Есть ли точка не из пути i ближе tol к pt."""
+        d = np.hypot(self.xy[:, 0] - pt[0], self.xy[:, 1] - pt[1])
+        return bool(((d < tol) & (self.owner != i)).any())
+
+
 def _attached(paths, tol=2.0):
     """Для каждого пути: касается ли его начало или конец другого пути."""
-    pts = [np.asarray(p, float) for p in paths]
+    pool = _PointPool(paths)
     out = []
-    for i, p in enumerate(pts):
-        hit = False
-        for end in (p[0], p[-1]):
-            for j, q in enumerate(pts):
-                if j != i and len(q) and float(np.min(np.hypot(*(q - end).T))) < tol:
-                    hit = True
-                    break
-            if hit:
-                break
-        out.append(hit)
+    for i, p in enumerate(paths):
+        a = (float(p[0][0]), float(p[0][1]))
+        b = (float(p[-1][0]), float(p[-1][1]))
+        out.append(pool.near_other(i, a, tol) or pool.near_other(i, b, tol))
     return out
 
 
@@ -750,14 +797,10 @@ def extend_ends(paths, sk, body, sw):
     # Смотрим на уже очищенные пути, а не на скелет: на кончике толстого
     # штриха скелет оставляет крошечную «вилку», её обрезали, но по
     # скелету конец выглядел развилкой и не продлевался
-    pts = [np.asarray(pa, float) for pa in paths]
+    pool = _PointPool(paths)
 
     def free(i, pt):
-        q = np.asarray(pt, float)
-        for j, other in enumerate(pts):
-            if j != i and len(other) and                     float(np.min(np.hypot(*(other - q).T))) < 2.0:
-                return False
-        return True
+        return not pool.near_other(i, (float(pt[0]), float(pt[1])), 2.0)
 
     def straight(seq, kmax):
         """Сколько точек от конца лежит на одной прямой (не больше kmax)."""
@@ -900,13 +943,15 @@ def vectorize_image(img, **kw):
                           ink_level=o["ink_level"])
     if o["largest_blobs"]:
         mask = keep_largest(mask, o["largest_blobs"])
+    sw = stroke_width(mask)
     strokes = vectorize_mask(mask,
                              min_branch=o["min_branch"],
                              smooth=o["smooth"],
                              simplify_tol=o["simplify_tol"],
                              merge_gap=o["merge_gap"],
-                             min_path_len=o["min_path_len"])
+                             min_path_len=o["min_path_len"],
+                             sw=sw)
     dbg = {"gray": gray, "mask": mask,
            "ink_px": int(mask.sum()),
-           "stroke_width": stroke_width(mask)}
+           "stroke_width": sw}
     return strokes, dbg
