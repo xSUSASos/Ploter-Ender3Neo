@@ -415,9 +415,19 @@ class App(tk.Tk):
         if geom:
             try:
                 self.geometry(geom)
+                self._geom = geom
             except tk.TclError:
                 pass
         return ", ".join(got)
+
+    def _geometry_to_save(self):
+        """Размер окна, но не скрытого или свёрнутого (там он 1×1)."""
+        try:
+            if self.state() in ("normal", "zoomed"):
+                self._geom = self.winfo_geometry()
+        except tk.TclError:
+            pass
+        return getattr(self, "_geom", "")
 
     # переключатели окна, которых нет в Config: тоже переживают перезапуск
     _UI_VARS = ("v_travel", "v_margins", "v_fallback", "v_sheet", "v_preset",
@@ -485,7 +495,7 @@ class App(tk.Tk):
                            "art": self._art.path if self._art else "",
                            "sketch": [[[round(x, 3), round(y, 3)] for x, y in q]
                                       for q in self._sketch],
-                           "geometry": self.winfo_geometry(),
+                           "geometry": self._geometry_to_save(),
                            "config": self.cfg.to_dict(),
                            "text": self.txt.get("1.0", "end-1c"),
                            "ui": self._ui_state()},

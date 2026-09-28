@@ -294,6 +294,11 @@ def cmd_selftest(_a):
         import tkinter as tk
         from hw.gui.app import App
         import time as _t
+        import tempfile as _tf
+        # окно не должно ни читать, ни перезаписывать настоящие настройки
+        keep_state = os.environ.get("HW_STATE")
+        os.environ["HW_STATE"] = os.path.join(_tf.mkdtemp(prefix="hwstate_"),
+                                              "state.json")
         app = App()
         app.withdraw()
         # первая раскладка запускается через after(120), поэтому ждём её,
@@ -316,6 +321,12 @@ def cmd_selftest(_a):
     except Exception as e:                              # noqa: BLE001
         _out("  СБОЙ окно программы -> %s" % e)
         bad.append("gui")
+    finally:
+        if "keep_state" in locals():
+            if keep_state is None:
+                os.environ.pop("HW_STATE", None)
+            else:
+                os.environ["HW_STATE"] = keep_state
 
     _out("итог: " + ("всё работает" if not bad else "проблемы: " + ", ".join(bad)))
     return 1 if bad else 0
