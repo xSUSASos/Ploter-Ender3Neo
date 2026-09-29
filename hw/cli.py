@@ -5,6 +5,7 @@
     python -m hw.cli text -i письмо.txt -o письмо.gcode --size 6 --preset Обычно
     python -m hw.cli template -o propis/ --variants 3
     python -m hw.cli import -s propis/propis_spec.json -p foto1.jpg -o pochevk.json
+    python -m hw.cli freehand -p лист.jpg -t что_написано.txt -o pocherk.json
     python -m hw.cli calib -o calib.gcode
     python -m hw.cli draw -i кот.png -o кот.gcode --mode hatch --width 100
 """
@@ -67,6 +68,8 @@ def cmd_text(a):
         cfg.page.autofit = True
     if a.grid:
         cfg.page.grid = True
+    if a.joins:
+        cfg.human.joins = True
     if a.seed is not None:
         cfg.human.seed = a.seed
     if a.no_human:
@@ -204,6 +207,28 @@ def cmd_import(a):
         _out("нет ещё: " + "".join(missing[:40]))
     _out("сохранено: %s" % a.output)
     return 0
+
+
+def cmd_freehand(a):
+    """Свободный лист (эксперимент): фото + что на нём написано -> шрифт."""
+    from .core import freehand as FH
+    text = a.text if a.text else _read_text(a.text_file)
+    fs = FontSet.load(a.font) if (a.font and os.path.exists(a.font)) else FontSet()
+    sh = FH.FreeSheet(a.photo, ink_level=a.ink, ruled=not a.no_ruling)
+    sh.set_text(L.clean_text(text))
+    for w in sh.warnings:
+        _out("внимание: " + w)
+    got = 0
+    for i, ln in enumerate(sh.lines):
+        _out("строка %d: %s   (наклон %.0f°%s)" % (
+            i + 1, ln.text, __import__("math").degrees(__import__("math").atan(ln.slant)),
+            ", " + ln.note if ln.note else ""))
+    for ch, g, _where in sh.glyphs():
+        fs.add(g)
+        got += 1
+    fs.save(a.output)
+    _out("букв вырезано: %d · сохранено: %s" % (got, a.output))
+    return 0 if got else 1
 
 
 def cmd_calib(a):
@@ -344,6 +369,8 @@ def build_parser():
                    help="поворот листа на столе, любой угол, градусы")
     t.add_argument("--text-angle", dest="text_angle", type=float,
                    help="поворот текста на листе, любой угол, градусы")
+    t.add_argument("--joins", action="store_true",
+                   help="соединять буквы в словах (эксперимент)")
     t.add_argument("--origin-x", dest="origin_x", type=float)
     t.add_argument("--origin-y", dest="origin_y", type=float)
     t.add_argument("--margin-left", dest="margin_left", type=float)
@@ -420,6 +447,20 @@ def build_parser():
     im.add_argument("--dpi", type=int, default=200)
     im.add_argument("--page", type=int, help="номер листа прописи")
     im.set_defaults(func=cmd_import)
+
+    fh = sub.add_parser("freehand",
+                        help="эксперимент: фото любого листа с текстом -> шрифт")
+    fh.add_argument("-p", "--photo", required=True, help="фото листа")
+    g = fh.add_mutually_exclusive_group(required=True)
+    g.add_argument("-t", "--text-file", dest="text_file",
+                   help="файл: что написано на листе, строка в строку")
+    g.add_argument("-T", "--text", help="то же прямо в команде (строки через \n)")
+    fh.add_argument("-o", "--output", required=True, help="куда писать шрифт .json")
+    fh.add_argument("--font", help="дополнить существующий шрифт")
+    fh.add_argument("--ink", type=float, default=0.68, help="порог чернил 0.35..0.92")
+    fh.add_argument("--no-ruling", dest="no_ruling", action="store_true",
+                    help="не убирать клетку/линейку (чистый лист)")
+    fh.set_defaults(func=cmd_freehand)
 
     c = sub.add_parser("calib", help="лесенка Z для подбора высоты пера")
     c.add_argument("-o", "--output", required=True)

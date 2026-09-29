@@ -109,10 +109,12 @@ def tremor(strokes, amp, wavelength, rng, step=None):
 
 # --------------------------------------------------------- буква целиком
 
-def humanize_glyph(strokes, cfg, rng, size_units=CAP):
+def humanize_glyph(strokes, cfg, rng, size_units=CAP, protect=()):
     """
     Исказить один глиф. strokes — в единицах шрифта.
     size_units — сколько единиц шрифта приходится на «размер» (обычно CAP).
+    protect — номера штрихов, которые «непрописанными» не бывают: на них
+    держатся соединения с соседними буквами. Порядок штрихов сохраняется.
     """
     if not cfg.enabled or not strokes:
         return [list(s) for s in strokes]
@@ -121,7 +123,8 @@ def humanize_glyph(strokes, cfg, rng, size_units=CAP):
 
     # пропуск отдельных штрихов — перо не пишет
     if cfg.skip_rate > 0 and len(out) > 1:
-        kept = [s for s in out if rng.random() >= cfg.skip_rate]
+        kept = [s for i, s in enumerate(out)
+                if rng.random() >= cfg.skip_rate or i in protect]
         out = kept or out
 
     sc = 1.0 + rng.uniform(-cfg.jitter_size, cfg.jitter_size)

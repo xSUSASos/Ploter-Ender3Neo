@@ -8,7 +8,9 @@ ROOT = os.path.dirname(HERE)
 SUITES = [("конвейер и G-code", "test_pipeline.py"),
           ("сбор почерка с фото", "test_handwriting.py"),
           ("окно программы", "test_gui.py"),
-          ("рисунки и поворот текста", "test_drawing.py")]
+          ("рисунки и поворот текста", "test_drawing.py"),
+          ("свободный лист и соединения букв", "test_freehand.py"),
+          ("таблицы и формулы LaTeX", "test_tables_math.py")]
 
 bad = []
 for title, fn in SUITES:

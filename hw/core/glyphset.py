@@ -31,6 +31,14 @@ class Glyph:
     strokes: list = field(default_factory=list)   # [[(x, y), ...], ...]
     source: str = "builtin"                       # builtin | user
     note: str = ""
+    # соединения с соседями в слове (см. joins.py). entry/exit — точки
+    # входа и выхода соединительной линии, единицы шрифта; None — найти
+    # самим. join_l/join_r: None — как решит программа, True/False — всегда
+    # соединять / никогда
+    entry: tuple = None
+    exit: tuple = None
+    join_l: bool = None
+    join_r: bool = None
 
     def bbox(self):
         pts = [p for s in self.strokes for p in s]
@@ -45,7 +53,7 @@ class Glyph:
                    for s in self.strokes for i in range(len(s) - 1))
 
     def to_dict(self):
-        return {
+        d = {
             "char": self.char,
             "advance": round(self.advance, 3),
             "source": self.source,
@@ -53,19 +61,33 @@ class Glyph:
             # штрихи пишем плоскими списками — файл получается вдвое компактнее
             "strokes": [[round(v, 2) for p in s for v in p] for s in self.strokes],
         }
+        # ключи соединений — только если заданы: старые файлы не меняются
+        for k in ("entry", "exit"):
+            v = getattr(self, k)
+            if v is not None:
+                d[k] = [round(v[0], 2), round(v[1], 2)]
+        for k in ("join_l", "join_r"):
+            v = getattr(self, k)
+            if v is not None:
+                d[k] = bool(v)
+        return d
 
     @classmethod
     def from_dict(cls, d):
         strokes = []
         for flat in d.get("strokes", []):
             strokes.append([(flat[i], flat[i + 1]) for i in range(0, len(flat) - 1, 2)])
+        pt = lambda v: (float(v[0]), float(v[1])) if v else None
         return cls(char=d["char"], advance=float(d["advance"]),
                    strokes=strokes, source=d.get("source", "user"),
-                   note=d.get("note", ""))
+                   note=d.get("note", ""),
+                   entry=pt(d.get("entry")), exit=pt(d.get("exit")),
+                   join_l=d.get("join_l"), join_r=d.get("join_r"))
 
     def copy(self):
         return Glyph(self.char, self.advance,
-                     [list(s) for s in self.strokes], self.source, self.note)
+                     [list(s) for s in self.strokes], self.source, self.note,
+                     self.entry, self.exit, self.join_l, self.join_r)
 
 
 # ------------------------------------------------------------- нормализация

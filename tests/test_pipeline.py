@@ -28,7 +28,7 @@ try:
 
     print("шрифт:")
     check("глифов в наборе", len(FV.GLYPHS) >= 160, "%d" % len(FV.GLYPHS))
-    odd = "„×·±≈≠≤≥€₽£‰§′″←→½²³éüñç«»—№"
+    odd = "„×·±≈≠≤≥€₽£‰§′″←→½²³éüñç«»—№ωφ√∞αβγδελμπστΔΣΩ−₁₂∫∂"
     check("частые знаки есть в шрифте", all(FV.has_glyph(c) for c in odd),
           "нет: " + ("".join(c for c in odd if not FV.has_glyph(c)) or "—"))
     t = L.clean_text("е" + chr(0x308) + "ж, и" + chr(0x306) + "од, ру" + chr(0x301)

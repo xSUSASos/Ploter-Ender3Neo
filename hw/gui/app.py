@@ -557,6 +557,11 @@ class App(tk.Tk):
         ttk.Button(bar, text="Открыть файл…", command=self.open_text).pack(side="left")
         ttk.Button(bar, text="Очистить",
                    command=lambda: self.txt.delete("1.0", "end")).pack(side="left", padx=6)
+        ttk.Button(bar, text="Таблица", style="Small.TButton",
+                   command=self.insert_table).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text="Формула", style="Small.TButton",
+                   command=self.insert_formula).pack(side="left", padx=(4, 0))
+        InfoIcon(self, bar, HELP["tables_math"]).pack(side="left", padx=(4, 0))
         self.lbl_chars = ttk.Label(bar, text="", style="Hint.TLabel")
         self.lbl_chars.pack(side="right")
 
@@ -603,6 +608,27 @@ class App(tk.Tk):
         self.canvas = tk.Canvas(right, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", lambda e: self.redraw())
+
+    def insert_table(self):
+        """Заготовка таблицы с новой строки — дальше заполняют руками."""
+        t = self.txt
+        pre = "" if t.compare("insert linestart", "==", "insert") else "\n"
+        t.insert("insert", pre + "| Столбец 1 | Столбец 2 | Столбец 3 |\n"
+                                 "|---|---|---|\n|  |  |  |\n|  |  |  |\n")
+        t.focus_set()
+
+    def insert_formula(self):
+        """$…$ с курсором внутри; выделенный текст становится формулой."""
+        t = self.txt
+        try:
+            pos = t.index("sel.first")
+            sel = t.get("sel.first", "sel.last")
+            t.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pos, sel = t.index("insert"), ""
+        t.insert(pos, "$" + sel + "$")
+        t.mark_set("insert", "%s+%dc" % (pos, len(sel) + 1))
+        t.focus_set()
 
     def _txt_focus(self, on):
         C = self.C
@@ -862,6 +888,22 @@ class App(tk.Tk):
                         variable=self.v_fallback,
                         command=self.on_change).pack(side="left")
         InfoIcon(self, fb, HELP["fallback"]).pack(side="left", padx=4)
+
+        g4 = ttk.LabelFrame(left, text="4. Эксперимент")
+        g4.pack(fill="x", pady=(8, 0))
+        fr = ttk.Frame(g4)
+        fr.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Button(fr, text="Почерк со свободного листа…",
+                   command=self.open_freehand).pack(side="left", fill="x", expand=True)
+        InfoIcon(self, fr, HELP["freehand"]).pack(side="left", padx=4)
+        ttk.Label(g4, text="любой лист с текстом, без прописи",
+                  style="Hint.TLabel").pack(anchor="w", padx=8)
+        jf = ttk.Frame(g4)
+        jf.pack(fill="x", padx=2, pady=(6, 0))
+        Field(self, jf, 0, "соединять буквы", "human", "joins", "bool")
+        Field(self, jf, 1, "дальность", "human", "join_reach", "scale", 0.3, 2.0)
+        ttk.Button(g4, text="Редактор соединений…",
+                   command=self.open_joins).pack(fill="x", padx=8, pady=(2, 8))
 
         head = ttk.Frame(f)
         head.grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 0))
@@ -1516,14 +1558,19 @@ class App(tk.Tk):
             yield c
             yield from self._walk(c)
 
-    def _titlebar(self, dark):
+    def _titlebar_for(self, win):
+        """Та же рамка для дочернего окна."""
+        self._titlebar(bool(self.v_dark.get()), win)
+
+    def _titlebar(self, dark, win=None):
         """Тёмная рамка окна Windows 10/11 — иначе заголовок остаётся белым."""
         if sys.platform != "win32":
             return
+        win = win or self
         try:
             import ctypes
-            self.update_idletasks()
-            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            win.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
             val = ctypes.c_int(1 if dark else 0)
             for attr in (20, 19):       # DWMWA_USE_IMMERSIVE_DARK_MODE (новый/старый)
                 if ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -2393,6 +2440,40 @@ class App(tk.Tk):
         self._say(msg, error=bool(errors))
         if errors and not found:
             messagebox.showerror("Не удалось прочитать лист", "\n".join(errors))
+
+    # ------------------------------------------------ эксперимент
+    def open_freehand(self):
+        from .freehand_win import FreehandWindow
+        w = getattr(self, "_freehand", None)
+        if w is not None and w.winfo_exists():
+            w.lift()
+            return
+        self._freehand = FreehandWindow(self)
+
+    def open_joins(self):
+        from .freehand_win import JoinEditor
+        w = getattr(self, "_joins", None)
+        if w is not None and w.winfo_exists():
+            w.fill()
+            w.lift()
+            return
+        self._joins = JoinEditor(self)
+
+    def set_joins(self, on):
+        self.cfg.human.joins = bool(on)
+        for f in self.fields:
+            if (f.section, f.attr) == ("human", "joins"):
+                f.pull()
+        self.rebuild()
+
+    def receive_freehand(self, items, source=""):
+        """Буквы со свободного листа -> сетка «Распознанное»."""
+        self._recognized = items
+        self.nb.select(self.tab_hand)
+        self.v_view.set("new")
+        self._render_glyph_grid()
+        self._say("со свободного листа %s: букв %d — проверьте и нажмите "
+                  "«Принять распознанное»" % (source, len(items)))
 
     def _font_items(self):
         """Содержимое своего шрифта плоским списком: [char, вариант, Glyph]."""

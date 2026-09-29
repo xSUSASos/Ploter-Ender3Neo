@@ -14,15 +14,21 @@
   * автоподбор размера, чтобы текст поместился на страницу;
   * разлив на несколько страниц;
   * описки с зачёркиванием и кляксы;
-  * разлиновку «под тетрадь».
+  * разлиновку «под тетрадь»;
+  * таблицы: строки вида «| a | b |» (как в Markdown) или ячейки через
+    табуляцию (так их копируют из Word и Excel) — рамка рисуется пером;
+  * формулы LaTeX: $...$ в строке, $$...$$ отдельной строкой по центру.
 """
 
 import math
+import re
 import unicodedata
 from dataclasses import dataclass, field
 
 from .glyphset import CAP
 from . import humanize as HM
+from . import joins as JN
+from . import mathtex as MT
 
 
 @dataclass
@@ -30,6 +36,10 @@ class Word:
     text: str
     struck: bool = False        # это зачёркиваемая (ошибочная) копия
     width: float = 0.0          # мм, номинальная
+    # слово с формулой: [("t", текст) | ("b", Box формулы)], иначе None
+    parts: list = None
+    hi: float = 0.0             # выше базовой линии, единицы шрифта (формулы)
+    lo: float = 0.0             # ниже базовой линии
 
 
 @dataclass
@@ -41,6 +51,28 @@ class Line:
     width: float = 0.0
     gap_before: float = 0.0   # доп. отбивка сверху (между абзацами), мм
     y: float = 0.0            # базовая линия, мм вниз от верха текстового блока
+    # строка таблицы: cells — [(смещение_мм, ширина_мм, [Word], по_центру)],
+    # table — общая для всех строк одной таблицы, row — номер ряда
+    cells: list = None
+    table: object = None
+    row: int = 0
+    center: bool = False      # формула $$…$$ — по центру строки
+    height_mm: float = 0.0    # формула выше обычной строки: сколько над базовой
+    depth_mm: float = 0.0     # ...и под ней
+
+
+@dataclass
+class Table:
+    """Геометрия таблицы, общая для всех её строк (мм)."""
+    x0: float                 # левый край рамки на листе
+    cols: list                # ширины столбцов
+    pad: float                # поле ячейки слева и справа
+    up: float                 # от базовой линии первой строки ряда до верхней черты
+    down: float               # от базовой линии последней строки ряда до нижней
+    row_gap: float            # добавка к межстрочному между рядами
+    top_extra: float          # сдвиг вниз, если ряд начинает страницу
+    margin: float = 0.0       # отбивка до и после таблицы
+    shift: float = 0.0        # текст ячеек ниже базовой линии строки, мм
 
 
 @dataclass
@@ -104,6 +136,95 @@ def clean_text(text):
     return unicodedata.normalize("NFC", text).translate(_INVISIBLE)
 
 
+# разделитель шапки в Markdown: |---|:---:|
+_MD_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _pipe_row(raw):
+    s = raw.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def _is_tab_row(raw):
+    # табуляция внутри текста, а не только отступ в начале абзаца
+    return "\t" in raw.strip()
+
+
+def split_blocks(text):
+    """
+    Текст -> [("par", [слова]) | ("table", [[ячейка, ...], ...])].
+
+    Таблица — подряд идущие строки, начинающиеся с «|», или хотя бы две
+    строки подряд с табуляцией между ячейками.
+    """
+    raw = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out, i, n = [], 0, len(raw)
+    while i < n:
+        ln = raw[i]
+        if ln.strip().startswith("|"):
+            rows = []
+            while i < n and raw[i].strip().startswith("|"):
+                if not _MD_SEP.match(raw[i]):
+                    rows.append(_pipe_row(raw[i]))
+                i += 1
+        elif _is_tab_row(ln) and i + 1 < n and _is_tab_row(raw[i + 1]):
+            rows = []
+            while i < n and _is_tab_row(raw[i]):
+                rows.append([c.strip() for c in raw[i].strip(" ").split("\t")])
+                i += 1
+        else:
+            out.append(("par", _split_words(ln)))
+            i += 1
+            continue
+        if rows:
+            ncol = max(len(r) for r in rows)
+            out.append(("table", [r + [""] * (ncol - len(r)) for r in rows]))
+    return out
+
+
+def _split_words(raw):
+    """Строка -> слова; слово с формулой — список частей (см. mathtex.tokens)."""
+    if ("$" in raw or "\\(" in raw or "\\[" in raw) and MT.has_math(raw):
+        out = []
+        for parts in MT.tokens(raw):
+            if any(pt[0] == "m" for pt in parts):
+                out.append(parts)
+            else:
+                out.append("".join(pt[1] for pt in parts))
+        return out
+    return raw.split()
+
+
+def _make_word(item, metrics):
+    """Строка или части с формулой -> Word."""
+    if isinstance(item, str):
+        return Word(item)
+    parts, text, hi, lo = [], "", 0.0, 0.0
+    for pt in item:
+        if pt[0] == "t":
+            parts.append(pt)
+            text += pt[1]
+            hi = max(hi, CAP)
+        else:
+            box = MT.layout(pt[1], metrics, display=pt[2])
+            parts.append(("b", box))
+            text += "$" + pt[1] + "$"
+            hi, lo = max(hi, box.h), max(lo, box.d)
+    return Word(text, parts=parts, hi=hi, lo=lo)
+
+
+def _wwidth(fontset, w, size_mm, cfg):
+    if not w.parts:
+        return word_width(fontset, w.text, size_mm, cfg.tracking_mm)
+    k = size_mm / CAP
+    return sum(word_width(fontset, pt[1], size_mm, cfg.tracking_mm) if pt[0] == "t"
+               else pt[1].w * k for pt in w.parts)
+
+
 def split_paragraphs(text):
     """Текст -> список абзацев, абзац -> список слов."""
     pars = []
@@ -112,7 +233,7 @@ def split_paragraphs(text):
     return pars
 
 
-def apply_errors(words, human):
+def apply_errors(words, human, metrics=None):
     """
     Вставить описки и зачёркивания.
 
@@ -128,6 +249,9 @@ def apply_errors(words, human):
     # сопровождается исправлением
     p = max(strike_p, typo_p)
     for w in words:
+        if not isinstance(w, str):
+            out.append(_make_word(w, metrics))
+            continue
         if len(w) > 2 and p > 0 and rng.random() < p:
             bad = HM.make_typo(w, rng) if (typo_p > 0 and rng.random() <
                                            (typo_p / p if p else 0.0)) else w
@@ -147,7 +271,7 @@ def wrap(words, fontset, cfg, size_mm, human, first_indent):
     cur.width = first_indent
 
     for w in words:
-        w.width = word_width(fontset, w.text, size_mm, cfg.tracking_mm)
+        w.width = _wwidth(fontset, w, size_mm, cfg)
         gap = sp * human.space_factor() if cur.words else 0.0
         need = cur.width + gap + w.width
 
@@ -158,7 +282,7 @@ def wrap(words, fontset, cfg, size_mm, human, first_indent):
             need = w.width
 
         # слово длиннее всей строки — режем по буквам
-        if not cur.words and w.width > maxw:
+        if not cur.words and w.width > maxw and not w.parts:
             for piece in _split_long(w, fontset, cfg, size_mm, maxw):
                 if cur.words:
                     lines.append(cur)
@@ -205,16 +329,225 @@ def measure(text, fontset, cfg, human, size_mm):
     # красная строка при выравнивании по центру или вправо только сбивала бы
     # строку вбок, поэтому применяем её лишь к левому краю и ширине
     indent = cfg.first_line_indent if cfg.align in ("left", "justify") else 0.0
-    for words in split_paragraphs(text):
-        if not words:
-            all_lines.append(Line(last_of_par=True))     # пустая строка
+    after_table = 0.0       # место под нижней чертой таблицы
+    metrics = MT.metrics_for(fontset)
+    for kind, data in split_blocks(text):
+        if kind == "table":
+            lines = table_lines(data, fontset, cfg, size_mm, metrics)
+            if not lines:
+                continue
+            lines[0].gap_before = (cfg.paragraph_gap if all_lines else 0.0) \
+                + lines[0].table.margin + after_table
+            after_table = lines[0].table.margin
+            all_lines.extend(lines)
             continue
-        ws = apply_errors(words, human)
-        lines = wrap(ws, fontset, cfg, size_mm, human, indent)
+        if not data:
+            ln = Line(last_of_par=True)                  # пустая строка
+            ln.gap_before, after_table = after_table, 0.0
+            all_lines.append(ln)
+            continue
+        ws = apply_errors(data, human, metrics)
+        display = (len(data) == 1 and not isinstance(data[0], str)
+                   and len(data[0]) == 1 and data[0][0][2])
+        lines = wrap(ws, fontset, cfg, size_mm, human,
+                     0.0 if display else indent)
+        k = size_mm / CAP
+        for ln in lines:
+            ln.center = display
+            ln.height_mm = max((w.hi for w in ln.words), default=0.0) * k
+            ln.depth_mm = max((w.lo for w in ln.words), default=0.0) * k
         if lines and all_lines:
-            lines[0].gap_before = cfg.paragraph_gap
+            lines[0].gap_before = cfg.paragraph_gap + after_table
+        after_table = 0.0
         all_lines.extend(lines)
     return len(all_lines), all_lines
+
+
+# ------------------------------------------------------------- таблицы
+
+def _col_widths(natural, minimal, avail):
+    """
+    Ширины столбцов (без полей), чтобы сумма влезла в avail.
+    Узкие столбцы получают сколько просят, остаток делится поровну между
+    широкими — так столбец с числами не сжимается из-за длинного текста рядом.
+    """
+    if sum(natural) <= avail:
+        return list(natural)
+    out = [None] * len(natural)
+    left = list(range(len(natural)))
+    rest = avail
+    while left:
+        share = rest / len(left)
+        small = [j for j in left if natural[j] <= share]
+        if not small:
+            for j in left:
+                out[j] = share
+            break
+        for j in small:
+            out[j] = natural[j]
+            rest -= natural[j]
+        left = [j for j in left if j not in small]
+    return [max(o, m) for o, m in zip(out, minimal)]
+
+
+def _cell_wrap(words, fontset, cfg, size_mm, width, sp):
+    """Слова ячейки -> строки [[Word, ...], ...] не шире width."""
+    lines, cur, cw = [], [], 0.0
+    for w in words:
+        w.width = _wwidth(fontset, w, size_mm, cfg)
+        pieces = [w] if (w.width <= width + 1e-6 or w.parts) else \
+            _split_long(w, fontset, cfg, size_mm, max(width, size_mm))
+        for pc in pieces:
+            need = cw + (sp if cur else 0.0) + pc.width
+            if cur and need > width + 1e-6:
+                lines.append(cur)
+                cur, cw = [], 0.0
+                need = pc.width
+            cur.append(pc)
+            cw = need
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def table_lines(rows, fontset, cfg, size_mm, metrics=None):
+    """Ряды таблицы -> строки Line с общей геометрией Table."""
+    metrics = metrics or MT.metrics_for(fontset)
+    rows = [[[_make_word(t, metrics) for t in _split_words(c)] for c in r]
+            for r in rows]
+    rows = [r for r in rows if any(r)] or rows
+    ncol = max((len(r) for r in rows), default=0)
+    if not ncol:
+        return []
+    sp = space_width(fontset, size_mm, cfg)
+    ww = lambda w: _wwidth(fontset, w, size_mm, cfg)   # noqa: E731
+    pad = 0.45 * size_mm
+    natural, minimal = [], []
+    for j in range(ncol):
+        cells = [r[j] for r in rows]
+        natural.append(max(1.6 * size_mm, max(
+            (sum(ww(t) for t in c) + sp * (len(c) - 1) for c in cells if c),
+            default=0.0)))
+        minimal.append(min(natural[-1], 1.6 * size_mm))
+    grid = bool(getattr(cfg, "grid", False))
+    cell = max(0.5, float(getattr(cfg, "grid_cell", 5.0)))
+    inner = _col_widths(natural, minimal, cfg.text_w - 2 * pad * ncol)
+    cols = [w + 2 * pad for w in inner]
+    if grid:
+        # в тетради в клетку столбцы кратны клетке, как чертят от руки
+        cols = [math.ceil(w / cell - 1e-6) * cell for w in cols]
+        while sum(cols) > cfg.text_w + 1e-6 and max(cols) > cell:
+            k = cols.index(max(cols))
+            cols[k] -= cell
+    total = sum(cols)
+    x0 = cfg.margin_left
+    if cfg.align == "center":
+        x0 += max(0.0, (cfg.text_w - total) / 2.0)
+    elif cfg.align == "right":
+        x0 += max(0.0, cfg.text_w - total)
+
+    lh = size_mm * cfg.line_spacing
+    descent = size_mm * 0.29
+    if grid:
+        # ряд — две клетки, черты по линиям клетки, текст посередине ряда
+        row_gap = up = down = top_extra = margin = lh
+        shift = size_mm / 2.0
+    else:
+        # буквы — посередине ряда, выносным (у, р, д) снизу хватает места
+        row_gap = max(0.25 * size_mm, 1.9 * size_mm - lh)
+        both = lh + row_gap
+        up, down = (both + size_mm) / 2.0, (both - size_mm) / 2.0
+        top_extra, margin, shift = up - size_mm, row_gap + 0.35 * size_mm, 0.0
+    tbl = Table(x0=x0, cols=cols, pad=pad, up=up, down=down, row_gap=row_gap,
+                top_extra=top_extra, margin=margin, shift=shift)
+
+    out = []
+    offs = [sum(cols[:j]) for j in range(ncol)]
+    for r, row in enumerate(rows):
+        wrapped = [_cell_wrap(c, fontset, cfg, size_mm, cols[j] - 2 * pad, sp)
+                   for j, c in enumerate(row)]
+        n = max(1, max(len(w) for w in wrapped))
+        for k in range(n):
+            cells = []
+            for j, w in enumerate(wrapped):
+                words = w[k] if k < len(w) else []
+                # короткое — по центру ячейки, длинный текст — от левого края
+                cells.append((offs[j], cols[j], words, len(w) <= 1))
+            out.append(Line(cells=cells, table=tbl, row=r, last_of_par=True,
+                            width=total,
+                            gap_before=(row_gap if (k == 0 and r) else 0.0)))
+    return out
+
+
+def _render_table_line(line, fontset, human, cfg, size_mm, base_mm, line_index):
+    t = line.table
+    sp = space_width(fontset, size_mm, cfg)
+    strokes = []
+    for (off, width, words, center) in line.cells:
+        if not words:
+            continue
+        total = sum(w.width for w in words) + sp * (len(words) - 1)
+        x = t.x0 + off + ((width - total) / 2.0 if center else t.pad)
+        for i, w in enumerate(words):
+            if i:
+                x += sp * human.space_factor()
+            ws, wwidth, _ = _render_word(w, fontset, human, cfg, size_mm,
+                                         x, base_mm - t.shift, line_index)
+            strokes.extend(ws)
+            x += wwidth
+    return strokes
+
+
+def _hand_line(p0, p1, human, size_mm):
+    """Черта рамки: у руки она чуть гуляет и не попадает точно в угол."""
+    hc = human.cfg
+    if not hc.enabled:
+        return [p0, p1]
+    rng = human.rng
+    ln = math.dist(p0, p1) or 1.0
+    ux, uy = (p1[0] - p0[0]) / ln, (p1[1] - p0[1]) / ln
+    over = 0.06 * size_mm
+    a = rng.uniform(-over, over * 0.5)
+    b = rng.uniform(-over, over)
+    q0 = (p0[0] - ux * a, p0[1] - uy * a)
+    q1 = (p1[0] + ux * b, p1[1] + uy * b)
+    amp = max(0.0, float(hc.tremor)) * size_mm * 0.6
+    return HM.tremor([[q0, q1]], amp, size_mm * 6.0, rng)[0]
+
+
+def _table_borders(chunk, top, human, size_mm):
+    """Рамки таблиц, попавших на страницу: сначала горизонтали, потом вертикали."""
+    out = []
+    i = 0
+    while i < len(chunk):
+        t = chunk[i].table
+        if t is None:
+            i += 1
+            continue
+        j = i
+        while j < len(chunk) and chunk[j].table is t:
+            j += 1
+        seg = chunk[i:j]
+        ys = [top - (seg[0].y - t.up)]
+        for a, b in zip(seg, seg[1:]):
+            if b.row != a.row:
+                ys.append(top - (a.y + t.down))
+        ys.append(top - (seg[-1].y + t.down))
+        xs = [t.x0]
+        for w in t.cols:
+            xs.append(xs[-1] + w)
+        # змейкой: перо не возвращается через всю таблицу к началу черты
+        for k, y in enumerate(ys):
+            a, b = (xs[0], y), (xs[-1], y)
+            out.append(_hand_line(a, b, human, size_mm) if k % 2 == 0
+                       else _hand_line(b, a, human, size_mm))
+        vx = xs if len(ys) % 2 == 0 else xs[::-1]
+        for k, x in enumerate(vx):
+            a, b = (x, ys[-1]), (x, ys[0])
+            out.append(_hand_line(a, b, human, size_mm) if k % 2 == 0
+                       else _hand_line(b, a, human, size_mm))
+        i = j
+    return out
 
 
 def paginate(lines, cfg, size_mm, first_skip=0.0):
@@ -236,19 +569,42 @@ def paginate(lines, cfg, size_mm, first_skip=0.0):
     descent = size_mm * 0.29          # запас под у, р, д, ц
     pages, cur = [], []
     y = None
+    grid = bool(getattr(cfg, "grid", False))
+
+    def snap(v):
+        # в клетку добавка — целыми строками, иначе строки сойдут с линий
+        if v <= 1e-6:
+            return 0.0
+        return math.ceil(v / lh - 1e-6) * lh if grid else v
+
+    prev_depth = descent
+    prev = None
     for ln in lines:
+        # строка таблицы: сверху нужна черта, снизу — черта под рядом
+        top_extra = ln.table.top_extra if ln.table is not None else 0.0
+        below = max(descent, ln.table.down) if ln.table is not None else descent
+        below = max(below, ln.depth_mm)
+        # формула с дробью выше заглавных или ниже выносных: между базовыми
+        # линиями нужно не меньше, чем глубина прошлой строки + высота этой
+        height = max(ln.height_mm, size_mm)
+        if ln.table is not None and (prev is None or prev.table is not ln.table):
+            height = max(height, ln.table.up)          # верхняя черта таблицы
+        over = snap(prev_depth + height + 0.25 * size_mm - lh)             if (height > size_mm or prev_depth > descent) else 0.0
+        top_extra += snap(ln.height_mm - size_mm)
         if y is None:
-            y = size_mm + first_skip
-            if first_skip > 0 and y + descent > avail + 1e-6:
+            y = size_mm + first_skip + top_extra
+            if first_skip > 0 and y + below > avail + 1e-6:
                 pages.append([])            # под рисунком не осталось места
-                y = size_mm
+                y = size_mm + top_extra
         else:
-            y += lh + ln.gap_before
-        if cur and y + descent > avail + 1e-6:
+            y += lh + max(ln.gap_before, over)
+        if cur and y + below > avail + 1e-6:
             pages.append(cur)
             cur = []
-            y = size_mm
+            y = size_mm + top_extra
         ln.y = y
+        prev_depth = max(descent, ln.depth_mm)
+        prev = ln
         cur.append(ln)
     if cur:
         pages.append(cur)
@@ -296,26 +652,78 @@ def _render_word(word, fontset, human, cfg, size_mm, x_mm, base_mm, line_index):
     Нарисовать слово. -> (штрихи в мм, фактическая ширина, bbox по Y).
     Координаты листа: X вправо, Y вверх.
     """
+    if word.parts:
+        strokes, pen = [], x_mm
+        ylo, yhi = base_mm, base_mm + size_mm
+        for pt in word.parts:
+            if pt[0] == "t":
+                st, w, (a, b) = _render_word(Word(pt[1]), fontset, human, cfg,
+                                             size_mm, pen, base_mm, line_index)
+            else:
+                st, w, (a, b) = MT.render(pt[1], fontset, human, size_mm, pen,
+                                          base_mm, line_index)
+            strokes.extend(st)
+            pen += w
+            ylo, yhi = min(ylo, a), max(yhi, b)
+        return strokes, pen - x_mm, (ylo, yhi)
     scale = size_mm / CAP
     hcfg = human.cfg
     strokes = []
     pen = x_mm
     ylo, yhi = base_mm, base_mm
+    joins = bool(getattr(hcfg, "joins", False))
+    reach = float(getattr(hcfg, "join_reach", 0.9)) * size_mm
+    prev = None     # выход предыдущей буквы: (номер штриха или None, точка, направление)
 
-    for ch in word.text:
+    text = word.text
+    for k, ch in enumerate(text):
         g = human.pick_variant(fontset, ch)
         gs = g.strokes
+        want_l = joins and prev is not None and JN.allows_left(g)
+        want_r = joins and k + 1 < len(text) and JN.allows_right(g)
+        w_in = w_out = None
+        if (want_l or want_r) and gs:
+            p_in, p_out = JN.points(g)
+            gs, w_in, w_out = JN.prepare(gs, p_in if want_l else None,
+                                         p_out if want_r else None)
         if hcfg.enabled and gs:
-            gs = HM.humanize_glyph(gs, hcfg, human.rng, size_units=CAP)
+            gs = HM.humanize_glyph(gs, hcfg, human.rng, size_units=CAP,
+                                   protect=(0, len(gs) - 1))
+        gs = [s for s in gs if len(s) >= 2]
         dy = human.baseline_offset(pen, line_index, size_mm)
-        for s in gs:
-            if len(s) < 2:
-                continue
-            pts = [(pen + x * scale, base_mm + dy + y * scale) for (x, y) in s]
-            strokes.append(pts)
-            for (_, yy) in pts:
+        mm = [[(pen + x * scale, base_mm + dy + y * scale) for (x, y) in s]
+              for s in gs]
+        first = len(strokes)
+        strokes.extend(mm)
+        for s in mm:
+            for (_, yy) in s:
                 ylo = min(ylo, yy)
                 yhi = max(yhi, yy)
+
+        # соединение с предыдущей буквой
+        p_in = JN.locate(mm, w_in) if want_l else None
+        if prev is not None and p_in is not None and math.dist(prev[1], p_in) <= reach:
+            t_in = JN.tangent(mm[0] if w_in == "first" else mm[-1], False,
+                              0.25 * size_mm)
+            con = JN.connector(prev[1], prev[2], p_in, t_in)
+            if w_in == "first":
+                # перо не отрывается: соединение переходит прямо в букву
+                strokes[first] = con + strokes[first][1:]
+            else:
+                strokes.insert(first, con)
+            i_prev = prev[0]
+            if i_prev == first - 1 and strokes[i_prev][-1] == prev[1]:
+                # ...и из предыдущей буквы тоже
+                strokes[i_prev] = strokes[i_prev] + strokes[first][1:]
+                strokes.pop(first)
+        prev = None
+        if want_r and mm and w_out is not None:
+            p_out = JN.locate(mm, w_out)
+            # последний штрих буквы кончается в точке выхода; склейка только
+            # дописывает штрихи спереди, так что ищем его по этой точке
+            idx = next((i for i in range(len(strokes) - 1, -1, -1)
+                        if strokes[i][-1] == p_out), None)
+            prev = (idx, p_out, JN.tangent(mm[-1], True, 0.25 * size_mm))
 
         # клякса
         if hcfg.enabled and hcfg.blot_rate > 0 and human.rng.random() < hcfg.blot_rate:
@@ -334,6 +742,9 @@ def _render_word(word, fontset, human, cfg, size_mm, x_mm, base_mm, line_index):
 def render_line(line, fontset, human, cfg, size_mm, base_mm, line_index,
                 justify=False):
     """Одна строка -> штрихи в мм."""
+    if line.cells is not None:
+        return _render_table_line(line, fontset, human, cfg, size_mm, base_mm,
+                                  line_index)
     strokes = []
     if not line.words:
         return strokes
@@ -345,7 +756,7 @@ def render_line(line, fontset, human, cfg, size_mm, base_mm, line_index,
         if slack > 0:
             extra = slack / gaps
 
-    if cfg.align == "center":
+    if cfg.align == "center" or line.center:
         x = cfg.margin_left + (cfg.text_w - line.width) / 2.0
     elif cfg.align == "right":
         x = cfg.margin_left + cfg.text_w - line.width
@@ -414,6 +825,7 @@ def build_pages(text, fontset, cfg, human, report=None, first_skip=0.0):
                 ln, fontset, human, cfg, size, top - ln.y, index,
                 justify=(cfg.align == "justify")))
             index += 1
+        pg.strokes.extend(_table_borders(chunk, top, human, size))
         if cfg.ruling:
             step = cfg.ruling_step or lh
             pg.guides = _ruling(cfg, step)

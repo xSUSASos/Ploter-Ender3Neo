@@ -115,6 +115,24 @@ check("Ctrl+X (кириллица)", t.get("1.0", "end-1c") == "" and app.clipbo
 r = app._ctrl_key(NS(widget=t, keysym="v", keycode=86))
 check("латиница не задваивает вставку", r is None and t.get("1.0", "end-1c") == "")
 
+print("таблица и формула:")
+t.delete("1.0", "end"); t.insert("1.0", "Текст"); t.mark_set("insert", "end-1c")
+app.insert_table()
+check("«Таблица» вставляет заготовку с новой строки",
+      t.get("1.0", "end-1c").startswith("Текст\n| Столбец 1 |"), repr(t.get("1.0", "3.0")))
+t.delete("1.0", "end"); t.insert("1.0", "a x^2 b")
+t.tag_add("sel", "1.2", "1.5")
+app.insert_formula()
+check("«Формула» оборачивает выделение в $…$", t.get("1.0", "end-1c") == "a $x^2$ b",
+      repr(t.get("1.0", "end-1c")))
+t.delete("1.0", "end")
+app.insert_formula(); t.insert("insert", "\\omega")
+check("пустая «Формула» ставит курсор между $", t.get("1.0", "end-1c") == "$\\omega$")
+t.delete("1.0", "end")
+t.insert("1.0", "| $\\omega$ | $L$ |\n| 2,5 | $\\frac{1}{2}$ |\n$$A = \\sqrt{2}$$")
+app.rebuild()
+check("таблица с формулами собирается в окне", app.pages and app.pages[0].strokes)
+
 print("тема:")
 app.v_dark.set(True); app.apply_theme(); app.update()
 check("тёмная тема включилась", app.tk.call("ttk::style", "theme", "use") == "clam")
@@ -182,6 +200,62 @@ try:
     _os.remove(app._state_file()); _os.remove(fp)
 except OSError:
     pass
+
+print("эксперимент — свободный лист и соединения:")
+check("галочка соединений привязана", ("human", "joins") in {(f.section, f.attr) for f in app.fields})
+from PIL import Image as _Im, ImageDraw as _Dr
+from hw.core.glyphset import FontSet as _FS
+_tmp = _os.path.join(tempfile.mkdtemp(prefix="hw_fw_"), "лист.png")
+_im = _Im.new("RGB", (900, 300), (245, 244, 240))
+_d = _Dr.Draw(_im)
+_x = 60
+for _ch in "мама":
+    _g = _FS().pick(_ch)[0]
+    for _s in _g.strokes:
+        _d.line([(_x + a * 5, 180 - b * 5) for a, b in _s], fill=(20, 20, 40), width=4)
+    _x += _g.advance * 5
+_im.save(_tmp)
+app.open_freehand()
+fw = app._freehand
+fw.withdraw()
+fw.path = _tmp
+fw.txt.insert("1.0", "мама")
+fw.analyse()
+for _ in range(300):
+    app.update()
+    if fw.sheet is not None and fw.sheet.lines:
+        break
+    time.sleep(0.02)
+check("свободный лист разобран", fw.sheet is not None and len(fw.sheet.lines) == 1,
+      fw.lbl.cget("text"))
+fw.send()
+check("буквы переданы в «Распознанное»", len(app._recognized) == 4, str(len(app._recognized)))
+for _it in app._recognized:
+    app.fontset.add(_it[2])
+app.open_joins()
+je = app._joins
+je.withdraw()
+app.update()
+check("редактор соединений видит свои буквы", len(je.items) >= 4)
+
+
+class _E:
+    pass
+
+
+_e = _E()
+_e.x, _e.y, _e.num = je.SIZE // 2, int(je.SIZE * 0.6), 1
+je.v_mode.set("exit")
+je._click(_e)
+check("щелчок ставит точку выхода", je.glyph().exit is not None)
+je.v_r.set("не соединять")
+je._flags()
+check("запрет соединения записан в букву", je.glyph().join_r is False)
+je.v_on.set(True)
+je._toggle_on()
+check("галочка в редакторе включает соединения", app.cfg.human.joins is True)
+je.destroy()
+fw.destroy()
 
 print("\nитог: %s" % ("всё в порядке" if not fails else "провалено: %s" % fails))
 app.destroy()
