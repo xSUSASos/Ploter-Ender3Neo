@@ -190,6 +190,10 @@ def suppress_template(norm, mask, template, ink_level, grow=2):
     # размытые края складываются, и на середине оставался «хвост»
     cut = min(float(ink_level), pen + 0.35 * (tpl_lvl - pen))
     out = mask & ~(zone & (norm >= cut))
+    # бледная или тонкая ручка по яркости почти как печать, и там, где
+    # штрих пересекает линию, его кусок стирался вместе с линией — буква
+    # рвалась на каждой линии шаблона. Возвращаем такие куски по геометрии
+    out = _restore_crossings(out, mask & zone & ~out, template, zone)
     # тонкие обрывки, целиком лежащие на напечатанных линиях и ни с чем
     # не связанные, — это сама печать в самых тёмных местах, а не ручка.
     # Настоящий штрих вдоль линии (низ L, Д, Ц) соединён с буквой, а точка
@@ -205,6 +209,157 @@ def suppress_template(norm, mask, template, ink_level, grow=2):
         drop[1:] = inside & (thick < 0.3 * stroke_width(own if own.any() else out))
         out = out & ~drop[lab]
     return out
+
+
+def _restore_crossings(out, removed, template, zone, spread=35.0, step=15.0):
+    """
+    Вернуть стёртые куски штриха там, где он пересекает напечатанную линию.
+
+    Кусок возвращается, только если чернила есть по обе стороны линии —
+    поперёк неё (с отклонением до spread градусов от нормали к линии).
+    Вдоль линии ничего не достраивается: иначе между двумя близкими
+    штрихами, стоящими на базовой, выросла бы полоска самой разлиновки.
+    """
+    if cv2 is None or not removed.any() or not out.any():
+        return out
+    tpl = cv2.GaussianBlur(255.0 - template.astype(np.float32), (0, 0), 1.5)
+    gx = cv2.Sobel(tpl, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(tpl, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.hypot(gx, gy)
+    normal = np.degrees(np.arctan2(gy, gx)) % 180.0
+    # полоса стирания шириной ~2 толщины зоны; перемычка должна её перекрыть
+    width = 2.0 * float(ndimage.distance_transform_edt(zone).max())
+    L = int(round(width)) + 3
+    L += 1 - L % 2
+    src = out.astype(np.uint8)
+    add = np.zeros_like(out)
+    cand = removed & (mag > 0.05 * float(mag.max()))
+    for th in np.arange(0.0, 180.0, step):
+        diff = np.abs((normal - th + 90.0) % 180.0 - 90.0)
+        sel = cand & (diff <= spread)
+        if not sel.any():
+            continue
+        k = np.zeros((L, L), np.uint8)
+        c = L // 2
+        dx, dy = np.cos(np.radians(th)) * c, np.sin(np.radians(th)) * c
+        cv2.line(k, (int(round(c - dx)), int(round(c - dy))),
+                 (int(round(c + dx)), int(round(c + dy))), 1, 1)
+        closed = cv2.morphologyEx(src, cv2.MORPH_CLOSE, k).astype(bool)
+        add |= sel & closed
+    if not add.any():
+        return out
+    # возвращённое должно быть перемычкой в штрихе, а не отдельным
+    # клочком разлиновки: пятна, где вернувшегося больше половины, — прочь
+    res = out | add
+    lab, n = ndimage.label(res, structure=np.ones((3, 3), int))
+    ids = np.arange(1, n + 1)
+    frac = np.asarray(ndimage.mean(add.astype(np.float32), lab, ids), float)
+    bad = np.zeros(n + 1, bool)
+    bad[1:] = frac > 0.5
+    return out | (add & ~bad[lab])
+
+
+def _end_dir(p, at_end, reach):
+    """Направление наружу на конце пути (по точке на расстоянии reach)."""
+    seq = p[::-1] if at_end else p
+    a, b = seq[0], None
+    for q in seq[1:]:
+        b = q
+        if math.dist(a, q) >= reach:
+            break
+    if b is None:
+        return None
+    n = math.dist(a, b)
+    if n < 1e-9:
+        return None
+    return (a[0] - b[0]) / n, (a[1] - b[1]) / n
+
+
+def bridge_erased(paths, erased, ink, sw, max_gap=6.0, min_cos=0.6):
+    """
+    Сшить концы штрихов через место, где чернила стёрты вместе с шаблоном.
+
+    Там, где буква идёт по линии разлиновки или касается её (верх «з»
+    и «п» на линии строчных), кусок штриха неотличим от печати и
+    пропадает — геометрией поперёк линии его не вернуть. Сшиваем два
+    конца, только если оба смотрят друг на друга и весь промежуток между
+    ними лежит на стёртых тёмных пикселях: так не вырастет перемычка
+    между двумя палочками, просто стоящими на одной линии.
+    """
+    if not erased.any():
+        return paths
+    r = max(1, int(round(0.5 * sw)))
+    ev = ndimage.binary_dilation(erased, iterations=r)
+    ok = ev | ndimage.binary_dilation(ink, iterations=r)
+    h, w = erased.shape
+    reach = 2.0 * sw
+    gap = max_gap * sw
+
+    def evidence(a, b):
+        n = max(2, int(math.dist(a, b)))
+        on = er = 0
+        for i in range(n + 1):
+            t = i / n
+            x = int(round(a[0] + (b[0] - a[0]) * t))
+            y = int(round(a[1] + (b[1] - a[1]) * t))
+            if not (0 <= x < w and 0 <= y < h):
+                return False
+            on += ok[y, x]
+            er += ev[y, x]
+        return on >= 0.9 * (n + 1) and er >= 0.5 * (n + 1)
+
+    def length(p):
+        return sum(math.dist(p[k], p[k + 1]) for k in range(len(p) - 1))
+
+    # точки и мелкие обрывки не сшиваем: точка «?» и «!» лежит на базовой
+    # линии, и её прирастило бы к палочке
+    def solid(p):
+        return len(p) >= 2 and length(p) >= 3 * sw and math.dist(p[0], p[-1]) > sw
+
+    paths = [list(p) for p in paths]
+    while True:
+        best = None
+        for i, p in enumerate(paths):
+            if not solid(p):
+                continue
+            for j in range(i, len(paths)):
+                q = paths[j]
+                if not solid(q):
+                    continue
+                for ei in (0, 1):
+                    for ej in (0, 1):
+                        if i == j and ei >= ej:
+                            continue
+                        a = p[-1] if ei else p[0]
+                        b = q[-1] if ej else q[0]
+                        d = math.dist(a, b)
+                        if d < 1e-6 or d > gap:
+                            continue
+                        if i == j and length(p) < 3 * d:
+                            continue
+                        ta, tb = _end_dir(p, ei, reach), _end_dir(q, ej, reach)
+                        if ta is None or tb is None:
+                            continue
+                        v = ((b[0] - a[0]) / d, (b[1] - a[1]) / d)
+                        ca = ta[0] * v[0] + ta[1] * v[1]
+                        cb = -(tb[0] * v[0] + tb[1] * v[1])
+                        if ca < min_cos or cb < min_cos or not evidence(a, b):
+                            continue
+                        score = d * (3.0 - ca - cb)
+                        if best is None or score < best[0]:
+                            best = (score, i, ei, j, ej)
+        if best is None:
+            return paths
+        _s, i, ei, j, ej = best
+        p, q = paths[i], paths[j]
+        if i == j:
+            path = p if ei else p[::-1]
+            paths[i] = path + [path[0]]
+        else:
+            pa = p if ei else p[::-1]
+            qb = q if not ej else q[::-1]
+            paths[i] = pa + qb
+            del paths[j]
 
 
 def _ink_dots(lab, n, sizes, big, norm, ink_level):
@@ -882,11 +1037,14 @@ def vectorize_image(img, **kw):
     o.update(kw)
     gray = to_gray(img)
     norm = None
+    erased = None
     if o["mode"] == "level":
         norm = ink_map(gray)
         mask = norm < float(o["ink_level"])
         if template is not None and template.shape == mask.shape:
-            mask = suppress_template(norm, mask, template, o["ink_level"])
+            kept = suppress_template(norm, mask, template, o["ink_level"])
+            erased = mask & ~kept
+            mask = kept
     else:
         mask = binarize(gray, ink_level=o["ink_level"], mode=o["mode"],
                         block=o["block"], offset=o["offset"])
@@ -906,6 +1064,8 @@ def vectorize_image(img, **kw):
                              simplify_tol=o["simplify_tol"],
                              merge_gap=o["merge_gap"],
                              min_path_len=o["min_path_len"])
+    if erased is not None and erased.any() and strokes:
+        strokes = bridge_erased(strokes, erased, mask, stroke_width(mask))
     dbg = {"gray": gray, "mask": mask,
            "ink_px": int(mask.sum()),
            "stroke_width": stroke_width(mask)}
